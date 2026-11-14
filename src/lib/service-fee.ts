@@ -1,3 +1,5 @@
+import { parseGoogleReviewUrl } from "@/lib/google-review";
+
 export const SERVICE_FEE_ITEM_ID = "service_fee";
 
 export function parseServiceFeePercent(raw: unknown) {
@@ -20,10 +22,14 @@ export type CartTotals = ReturnType<typeof cartTotals>;
 export function restaurantGoogleMapsUrl(row: {
   google_maps_review_url?: string | null;
   google_review_url?: string | null;
+  google_maps_url?: string | null;
 }) {
-  const url =
-    row.google_maps_review_url?.trim() || row.google_review_url?.trim() || "";
-  return url || null;
+  return parseGoogleReviewUrl(
+    row.google_maps_review_url ||
+      row.google_review_url ||
+      row.google_maps_url ||
+      "",
+  );
 }
 
 export function isServiceFeeItem(item: { dish_id?: string | null }) {
@@ -35,19 +41,22 @@ export function splitPricedItems(
 ) {
   const dishes = items.filter((item) => !isServiceFeeItem(item));
   const fees = items.filter((item) => isServiceFeeItem(item));
-  const subtotal = dishes.reduce(
-    (sum, item) => sum + item.quantity * item.unit_price,
-    0,
-  );
-  const serviceFee = fees.reduce(
-    (sum, item) => sum + item.quantity * item.unit_price,
-    0,
-  );
+  const subtotal =
+    Math.round(
+      dishes.reduce((sum, item) => sum + item.quantity * item.unit_price, 0) *
+        100,
+    ) / 100;
+  const serviceFee =
+    Math.round(
+      fees.reduce((sum, item) => sum + item.quantity * item.unit_price, 0) *
+        100,
+    ) / 100;
+  const grandTotal = Math.round((subtotal + serviceFee) * 100) / 100;
   return {
     dishes,
     subtotal,
     serviceFee,
-    grandTotal: subtotal + serviceFee,
+    grandTotal,
   };
 }
 

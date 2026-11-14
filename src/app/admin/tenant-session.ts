@@ -1,10 +1,23 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { bindTenantSession, clearTenantSession } from "@/lib/tenant";
+import {
+  bindTenantSession,
+  clearTenantSession,
+  switchTenantRestaurant,
+} from "@/lib/tenant";
 
 export async function bindManagerTenant(preferredSlug?: string | null) {
   return bindTenantSession(preferredSlug);
+}
+
+export async function switchActiveTenant(restaurantId: string) {
+  const result = await switchTenantRestaurant(restaurantId);
+  if (!result.error) {
+    revalidatePath("/admin", "layout");
+  }
+  return result;
 }
 
 export async function clearManagerTenant() {
@@ -12,7 +25,10 @@ export async function clearManagerTenant() {
 }
 
 export async function signOutAdminSession() {
-  const supabase = await createSupabaseServerClient();
-  await supabase.auth.signOut();
-  await clearTenantSession();
+  try {
+    const supabase = await createSupabaseServerClient();
+    await supabase.auth.signOut();
+  } finally {
+    await clearTenantSession();
+  }
 }

@@ -6,30 +6,93 @@ export const WAITER_CALL_SELECT =
 export const WAITER_CALL_SELECT_LEGACY =
   "id, restaurant_id, table_id, table_number, items, status, created_at";
 
-export function isMissingCallTypeColumn(error: { message?: string } | null | undefined) {
+function missingColumn(
+  error: { message?: string } | null | undefined,
+  column: string,
+) {
   const message = (error?.message ?? "").toLowerCase();
   return (
-    message.includes("call_type") &&
+    message.includes(column) &&
     (message.includes("schema cache") ||
       message.includes("column") ||
       message.includes("could not find"))
   );
 }
 
+export function isMissingCallTypeColumn(error: { message?: string } | null | undefined) {
+  return missingColumn(error, "call_type");
+}
+
+export function isMissingArchivedAtColumn(error: { message?: string } | null | undefined) {
+  const message = (error?.message ?? "").toLowerCase();
+  return message.includes("archived_at") && missingColumn(error, "archived_at");
+}
+
+export function isMissingReadyAtColumn(error: { message?: string } | null | undefined) {
+  return missingColumn(error, "ready_at");
+}
+
 export async function selectWaiterCalls(
   supabase: SupabaseClient,
   restaurantId: string,
 ) {
-  const withType = await supabase
+  const withReady = `${WAITER_CALL_SELECT}, ready_at`;
+  const withArchive = await supabase
     .from("waiter_calls")
-    .select(WAITER_CALL_SELECT)
+    .select(withReady)
     .eq("restaurant_id", restaurantId)
     .in("status", ["open", "acknowledged"])
+    .is("archived_at", null)
     .order("created_at", { ascending: false });
 
-  if (!withType.error) return withType;
+  if (
+    withArchive.error &&
+    missingColumn(withArchive.error, "ready_at")
+  ) {
+    const withoutReady = await supabase
+      .from("waiter_calls")
+      .select(WAITER_CALL_SELECT)
+      .eq("restaurant_id", restaurantId)
+      .in("status", ["open", "acknowledged"])
+      .is("archived_at", null)
+      .order("created_at", { ascending: false });
+    if (!withoutReady.error) return withoutReady;
+    if (isMissingArchivedAtColumn(withoutReady.error)) {
+      return supabase
+        .from("waiter_calls")
+        .select(WAITER_CALL_SELECT)
+        .eq("restaurant_id", restaurantId)
+        .in("status", ["open", "acknowledged"])
+        .order("created_at", { ascending: false });
+    }
+    return withoutReady;
+  }
 
-  if (!isMissingCallTypeColumn(withType.error)) return withType;
+  if (!withArchive.error) return withArchive;
+
+  if (isMissingArchivedAtColumn(withArchive.error)) {
+    const withoutArchive = await supabase
+      .from("waiter_calls")
+      .select(WAITER_CALL_SELECT)
+      .eq("restaurant_id", restaurantId)
+      .in("status", ["open", "acknowledged"])
+      .order("created_at", { ascending: false });
+    if (!withoutArchive.error || !isMissingCallTypeColumn(withoutArchive.error)) {
+      return withoutArchive;
+    }
+  }
+
+  if (!isMissingCallTypeColumn(withArchive.error)) return withArchive;
+
+  const legacyArchived = await supabase
+    .from("waiter_calls")
+    .select(WAITER_CALL_SELECT_LEGACY)
+    .eq("restaurant_id", restaurantId)
+    .in("status", ["open", "acknowledged"])
+    .is("archived_at", null)
+    .order("created_at", { ascending: false });
+  if (!legacyArchived.error) return legacyArchived;
+  if (!isMissingArchivedAtColumn(legacyArchived.error)) return legacyArchived;
 
   return supabase
     .from("waiter_calls")
@@ -37,6 +100,47 @@ export async function selectWaiterCalls(
     .eq("restaurant_id", restaurantId)
     .in("status", ["open", "acknowledged"])
     .order("created_at", { ascending: false });
+}
+
+export async function archiveAcknowledgedWaiterCalls(
+  supabase: SupabaseClient,
+  restaurantId: string,
+  ids?: string[],
+) {
+  const now = new Date().toISOString();
+  let archive = supabase
+    .from("waiter_calls")
+    .update({ archived_at: now })
+    .eq("restaurant_id", restaurantId)
+    .eq("status", "acknowledged")
+    .is("archived_at", null)
+    .not("ready_at", "is", null)
+    .select("id");
+  if (ids?.length) archive = archive.in("id", ids);
+  let archived = await archive;
+
+  if (archived.error && missingColumn(archived.error, "ready_at")) {
+    let withoutReady = supabase
+      .from("waiter_calls")
+      .update({ archived_at: now })
+      .eq("restaurant_id", restaurantId)
+      .eq("status", "acknowledged")
+      .is("archived_at", null)
+      .select("id");
+    if (ids?.length) withoutReady = withoutReady.in("id", ids);
+    archived = await withoutReady;
+  }
+
+
+  if (!archived.error || !isMissingArchivedAtColumn(archived.error)) {
+    return archived;
+  }
+
+  // Kitchen can hide these tickets in the UI. Never delete sales rows.
+  return {
+    data: (ids ?? []).map((id) => ({ id })),
+    error: null,
+  };
 }
 
 export async function insertWaiterCall(

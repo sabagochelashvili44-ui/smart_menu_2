@@ -3,15 +3,27 @@
 import { revalidatePath } from "next/cache";
 import {
   DEFAULT_BRAND,
+  autoBrandPalette,
+  isUuid,
   normalizeHex,
+  parseStoredFontAndColors,
+  serializeFontAndColors,
   slugifyRestaurant,
 } from "@/lib/restaurant-brand";
 import { loadSuperAdminNetwork } from "@/lib/super-admin-network";
 import { requireSuperAdmin, type SubscriptionStatus } from "@/lib/super-admin";
+import { ensureRestaurantAiHost } from "@/lib/restaurant-ai-host";
+import { seedRestaurantAiPrompts } from "@/lib/restaurant-ai-prompts";
+import { invalidateWaiterCaches } from "@/lib/ai-waiter-menu";
+import { resetRestaurantAiUsage } from "@/lib/ai-usage";
 import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
 import { setSuperAdminViewAs } from "@/lib/tenant";
 
-export type { SuperAdminKpis, SuperAdminRestaurant } from "@/lib/super-admin-network";
+export type {
+  SuperAdminHourlyBucket,
+  SuperAdminKpis,
+  SuperAdminRestaurant,
+} from "@/lib/super-admin-network";
 
 const DEFAULT_CATEGORIES = [
   "Cold Starters",
@@ -29,6 +41,35 @@ function asStatus(value: string): SubscriptionStatus {
     return value;
   }
   return "trial";
+}
+
+function asAiPlan(value: string): "free" | "paid" {
+  return value.trim() === "paid" ? "paid" : "free";
+}
+
+function asTokenLimit(value: FormDataEntryValue | null): number | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.round(n);
+}
+
+function isMissingAiOpsColumn(message: string) {
+  return (
+    message.includes("ai_plan") ||
+    message.includes("ai_daily_token_limit") ||
+    message.includes("ai_weekly_token_limit")
+  );
+}
+
+function isMissingRestaurantColumn(message: string) {
+  return (
+    message.includes("service_fee_percent") ||
+    message.includes("google_maps_review_url") ||
+    message.includes("google_review_url") ||
+    isMissingAiOpsColumn(message)
+  );
 }
 
 async function uploadLogo(
@@ -79,7 +120,11 @@ function parseTenantFields(formData: FormData) {
     String(formData.get("subscription_status") ?? "trial"),
   );
   const validRaw = String(formData.get("valid_until") ?? "").trim();
-  const valid_until = validRaw ? new Date(validRaw).toISOString() : null;
+  const parsedDate = validRaw ? new Date(validRaw) : null;
+  const valid_until =
+    parsedDate && !Number.isNaN(parsedDate.getTime())
+      ? parsedDate.toISOString()
+      : null;
   const primary_color = normalizeHex(
     String(formData.get("primary_color") ?? ""),
     DEFAULT_BRAND.primary_color,
@@ -92,6 +137,41 @@ function parseTenantFields(formData: FormData) {
     String(formData.get("bg_color") ?? ""),
     DEFAULT_BRAND.bg_color,
   );
+  const auto = autoBrandPalette({
+    primary_color,
+    secondary_color,
+    bg_color,
+  });
+  const extendedColors = {
+    text_color: normalizeHex(
+      String(formData.get("text_color") ?? ""),
+      auto.text_color,
+    ),
+    muted_text_color: normalizeHex(
+      String(formData.get("muted_text_color") ?? ""),
+      auto.muted_text_color,
+    ),
+    primary_text_color: normalizeHex(
+      String(formData.get("primary_text_color") ?? ""),
+      auto.primary_text_color,
+    ),
+    secondary_text_color: normalizeHex(
+      String(formData.get("secondary_text_color") ?? ""),
+      auto.secondary_text_color,
+    ),
+    price_color: normalizeHex(
+      String(formData.get("price_color") ?? ""),
+      auto.price_color,
+    ),
+    card_color: normalizeHex(
+      String(formData.get("card_color") ?? ""),
+      auto.card_color,
+    ),
+    border_color: normalizeHex(
+      String(formData.get("border_color") ?? ""),
+      auto.border_color,
+    ),
+  };
   const feeRaw = Number(formData.get("service_fee_percent"));
   const service_fee_percent = Number.isFinite(feeRaw)
     ? Math.min(100, Math.max(0, feeRaw))
@@ -120,11 +200,19 @@ function parseTenantFields(formData: FormData) {
     service_fee_percent,
     google_maps_review_url,
     google_review_url: google_maps_review_url,
+    ai_plan: asAiPlan(String(formData.get("ai_plan") ?? "free")),
+    ai_daily_token_limit: asTokenLimit(formData.get("ai_daily_token_limit")),
+    ai_weekly_token_limit: asTokenLimit(formData.get("ai_weekly_token_limit")),
     subscription_status,
     valid_until,
     primary_color,
     secondary_color,
     bg_color,
+    extendedColors,
+    font: serializeFontAndColors(
+      String(formData.get("font") ?? DEFAULT_BRAND.font),
+      extendedColors,
+    ),
   };
 }
 
@@ -158,10 +246,13 @@ export async function createSuperAdminRestaurant(formData: FormData) {
     primary_color: fields.primary_color,
     secondary_color: fields.secondary_color,
     bg_color: fields.bg_color,
-    font: DEFAULT_BRAND.font,
+    font: fields.font,
     service_fee_percent: fields.service_fee_percent,
     google_maps_review_url: fields.google_maps_review_url,
     google_review_url: fields.google_review_url,
+    ai_plan: fields.ai_plan,
+    ai_daily_token_limit: fields.ai_daily_token_limit,
+    ai_weekly_token_limit: fields.ai_weekly_token_limit,
   };
   let { data: created, error: insertError } = await supabase
     .from("restaurants")
@@ -170,12 +261,8 @@ export async function createSuperAdminRestaurant(formData: FormData) {
     .maybeSingle();
 
   if (insertError && !created) {
-    const message = insertError.message ?? "";
-    if (
-      message.includes("service_fee_percent") ||
-      message.includes("google_maps_review_url") ||
-      message.includes("google_review_url")
-    ) {
+    let message = insertError.message ?? "";
+    if (isMissingAiOpsColumn(message)) {
       const retry = await supabase
         .from("restaurants")
         .insert({
@@ -188,7 +275,31 @@ export async function createSuperAdminRestaurant(formData: FormData) {
           primary_color: fields.primary_color,
           secondary_color: fields.secondary_color,
           bg_color: fields.bg_color,
-          font: DEFAULT_BRAND.font,
+          font: fields.font,
+          service_fee_percent: fields.service_fee_percent,
+          google_maps_review_url: fields.google_maps_review_url,
+          google_review_url: fields.google_review_url,
+        })
+        .select("id")
+        .maybeSingle();
+      created = retry.data;
+      insertError = retry.error;
+      message = insertError?.message ?? "";
+    }
+    if (insertError && !created && isMissingRestaurantColumn(message)) {
+      const retry = await supabase
+        .from("restaurants")
+        .insert({
+          name: fields.name,
+          slug: fields.slug,
+          manager_email: fields.manager_email,
+          subscription_fee: fields.subscription_fee,
+          subscription_status: fields.subscription_status,
+          valid_until: fields.valid_until,
+          primary_color: fields.primary_color,
+          secondary_color: fields.secondary_color,
+          bg_color: fields.bg_color,
+          font: fields.font,
         })
         .select("id")
         .maybeSingle();
@@ -228,6 +339,10 @@ export async function createSuperAdminRestaurant(formData: FormData) {
     })),
   );
 
+  await ensureRestaurantAiHost(created.id);
+  await seedRestaurantAiPrompts(created.id);
+  invalidateWaiterCaches(created.id);
+
   revalidatePath("/admin/super-admin");
   revalidatePath("/menu", "layout");
   return {
@@ -260,9 +375,17 @@ export async function updateSuperAdminRestaurant(formData: FormData) {
 
   const current = await supabase
     .from("restaurants")
-    .select("logo, logo_url")
+    .select("logo, logo_url, font")
     .eq("id", id)
     .maybeSingle();
+
+  const existingFontId = parseStoredFontAndColors(
+    current.data?.font as string | null | undefined,
+  ).fontId;
+  const serializedFont = serializeFontAndColors(
+    existingFontId,
+    fields.extendedColors,
+  );
 
   const fallback =
     (current.data?.logo_url as string | null) ||
@@ -287,11 +410,15 @@ export async function updateSuperAdminRestaurant(formData: FormData) {
     primary_color: fields.primary_color,
     secondary_color: fields.secondary_color,
     bg_color: fields.bg_color,
+    font: serializedFont,
     logo: logo.url,
     logo_url: logo.url,
     service_fee_percent: fields.service_fee_percent,
     google_maps_review_url: fields.google_maps_review_url,
     google_review_url: fields.google_review_url,
+    ai_plan: fields.ai_plan,
+    ai_daily_token_limit: fields.ai_daily_token_limit,
+    ai_weekly_token_limit: fields.ai_weekly_token_limit,
   };
   let { error } = await supabase
     .from("restaurants")
@@ -299,12 +426,8 @@ export async function updateSuperAdminRestaurant(formData: FormData) {
     .eq("id", id);
 
   if (error) {
-    const message = error.message ?? "";
-    if (
-      message.includes("service_fee_percent") ||
-      message.includes("google_maps_review_url") ||
-      message.includes("google_review_url")
-    ) {
+    let message = error.message ?? "";
+    if (isMissingAiOpsColumn(message)) {
       const retry = await supabase
         .from("restaurants")
         .update({
@@ -317,6 +440,31 @@ export async function updateSuperAdminRestaurant(formData: FormData) {
           primary_color: fields.primary_color,
           secondary_color: fields.secondary_color,
           bg_color: fields.bg_color,
+          font: serializedFont,
+          logo: logo.url,
+          logo_url: logo.url,
+          service_fee_percent: fields.service_fee_percent,
+          google_maps_review_url: fields.google_maps_review_url,
+          google_review_url: fields.google_review_url,
+        })
+        .eq("id", id);
+      error = retry.error;
+      message = error?.message ?? "";
+    }
+    if (error && isMissingRestaurantColumn(message)) {
+      const retry = await supabase
+        .from("restaurants")
+        .update({
+          name: fields.name,
+          slug: fields.slug,
+          manager_email: fields.manager_email,
+          subscription_fee: fields.subscription_fee,
+          subscription_status: fields.subscription_status,
+          valid_until: fields.valid_until,
+          primary_color: fields.primary_color,
+          secondary_color: fields.secondary_color,
+          bg_color: fields.bg_color,
+          font: serializedFont,
           logo: logo.url,
           logo_url: logo.url,
         })
@@ -327,6 +475,7 @@ export async function updateSuperAdminRestaurant(formData: FormData) {
 
   if (error) return { error: error.message };
 
+  invalidateWaiterCaches(id);
   revalidatePath("/admin/super-admin");
   revalidatePath("/menu", "layout");
   return { error: null };
@@ -362,8 +511,18 @@ export async function deleteSuperAdminRestaurant(id: string) {
   const supabase = createSupabaseAdminClient();
   const { error } = await supabase.from("restaurants").delete().eq("id", id);
   if (error) return { error: error.message };
+  invalidateWaiterCaches(id);
   revalidatePath("/admin/super-admin");
   revalidatePath("/menu", "layout");
+  return { error: null };
+}
+
+export async function resetSuperAdminAiUsage(restaurantId: string) {
+  await requireSuperAdmin();
+  if (!isUuid(restaurantId)) return { error: "Restaurant not found." };
+  const result = await resetRestaurantAiUsage(restaurantId);
+  if (result.error) return result;
+  revalidatePath("/admin/super-admin");
   return { error: null };
 }
 

@@ -12,7 +12,13 @@ export function getPublicAppUrl() {
   if (fromEnv) {
     try {
       const parsed = new URL(fromEnv);
-      if (!isPreviewOrLocalHost(parsed.hostname)) {
+      // Honor explicit env always — including localhost for local DEV.
+      // Only ignore ephemeral Vercel preview hostnames when somehow set.
+      if (
+        parsed.hostname === "localhost" ||
+        parsed.hostname === "127.0.0.1" ||
+        !isPreviewOrLocalHost(parsed.hostname)
+      ) {
         return parsed.origin;
       }
     } catch {

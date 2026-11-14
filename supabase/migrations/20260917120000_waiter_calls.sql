@@ -32,6 +32,10 @@ create index if not exists waiter_calls_open_idx
 alter table public.waiter_calls enable row level security;
 alter table public.waiter_calls replica identity full;
 
+grant select, insert, update, delete on table public.waiter_calls
+  to anon, authenticated, service_role;
+grant all on table public.waiter_calls to service_role;
+
 drop policy if exists waiter_calls_select_authenticated on public.waiter_calls;
 create policy waiter_calls_select_authenticated
   on public.waiter_calls

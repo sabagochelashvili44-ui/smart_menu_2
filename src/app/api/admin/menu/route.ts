@@ -1,23 +1,28 @@
-import { deleteDish, getMenu, upsertCategory, upsertDish } from "@/lib/data/store";
+import {
+  deleteAdminDish,
+  loadAdminMenu,
+  saveAdminCategory,
+  saveAdminDish,
+} from "@/app/admin/actions";
+import { parseNutritionInput, parsePrepMinutes } from "@/lib/dish-nutrition";
+import type { RecipeInputLine } from "@/lib/dish-recipes";
 import { requireTenantApi } from "@/lib/tenant";
-import type { Category, Dish, Lang } from "@/types/database";
+import type { Category, Dish } from "@/types/database";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-const emptyTranslations = {
-  ka: { name: "", description: "" },
-  en: { name: "", description: "" },
-  ar: { name: "", description: "" },
-  ru: { name: "", description: "" },
-  fr: { name: "", description: "" },
-} satisfies Dish["translations"];
+function dishRecipe(dish: unknown): RecipeInputLine[] | undefined {
+  if (!dish || typeof dish !== "object" || !("recipe" in dish)) return undefined;
+  const recipe = (dish as { recipe?: unknown }).recipe;
+  return Array.isArray(recipe) ? (recipe as RecipeInputLine[]) : undefined;
+}
 
 export async function GET() {
   const tenant = await requireTenantApi();
   if (!tenant.ok) return tenant.response;
-  const menu = await getMenu(tenant.restaurant.id);
-  if (!menu) {
+  const menu = await loadAdminMenu();
+  if (!menu.restaurant) {
     return NextResponse.json({ error: "Restaurant not found" }, { status: 404 });
   }
   return NextResponse.json(menu);
@@ -26,59 +31,51 @@ export async function GET() {
 export async function POST(request: Request) {
   const tenant = await requireTenantApi(["owner", "manager"]);
   if (!tenant.ok) return tenant.response;
-  const body = (await request.json()) as {
+  const body = (await request.json().catch(() => null)) as {
     type?: "dish" | "category";
     dish?: Partial<Dish>;
     category?: Partial<Category>;
-  };
+  } | null;
 
-  if (body.type === "category" && body.category?.name) {
-    const category: Category = {
-      id: body.category.id || crypto.randomUUID(),
-      restaurant_id: tenant.restaurant.id,
+  if (body?.type === "category" && body.category?.name) {
+    const result = await saveAdminCategory({
+      id: body.category.id,
       name: body.category.name,
-      order_index: body.category.order_index ?? 99,
-      translations: body.category.translations ?? {
-        en: body.category.name,
-        ar: body.category.name,
-        ru: body.category.name,
-        fr: body.category.name,
-      },
-    };
-    return NextResponse.json({ category: await upsertCategory(category) });
+      name_en: body.category.name_en,
+      name_ru: body.category.name_ru,
+    });
+    if (result.error) {
+      return NextResponse.json({ error: result.error }, { status: 400 });
+    }
+    return NextResponse.json({ category: result.category });
   }
 
-  if (body.type === "dish" && body.dish?.name && body.dish.category_id) {
-    const menu = await getMenu(tenant.restaurant.id);
-    if (!menu?.categories.some((category) => category.id === body.dish?.category_id)) {
-      return NextResponse.json({ error: "Invalid category" }, { status: 403 });
-    }
-    const name = body.dish.name;
-    const description = body.dish.description ?? "";
-    const translations =
-      body.dish.translations ??
-      (Object.fromEntries(
-        (["en", "ar", "ru", "fr"] as Lang[]).map((lang) => [
-          lang,
-          { name, description },
-        ]),
-      ) as Dish["translations"]);
-
-    const dish: Dish = {
-      id: body.dish.id || crypto.randomUUID(),
+  if (body?.type === "dish" && body.dish?.name && body.dish.category_id) {
+    const result = await saveAdminDish({
+      id: body.dish.id,
       category_id: body.dish.category_id,
-      name,
-      description,
+      name: body.dish.name,
+      description: body.dish.description ?? "",
       price: Number(body.dish.price ?? 0),
-      margin_score: Number(body.dish.margin_score ?? 5),
-      image_url: body.dish.image_url ?? null,
+      image_url: body.dish.image_url ?? "",
       allergens: body.dish.allergens ?? [],
       ingredients: body.dish.ingredients ?? [],
       is_available: body.dish.is_available ?? true,
-      wine_pairing: body.dish.wine_pairing ?? "",
-      translations: { ...emptyTranslations, ...translations },
-    };
-    return NextResponse.json({ dish: await upsertDish(dish) });
+      calories: parseNutritionInput(body.dish.calories),
+      protein: parseNutritionInput(body.dish.protein),
+      carbs: parseNutritionInput(body.dish.carbs),
+      fat: parseNutritionInput(body.dish.fat),
+      prep_minutes: parsePrepMinutes(body.dish.prep_minutes),
+      name_en: body.dish.name_en,
+      name_ru: body.dish.name_ru,
+      description_en: body.dish.description_en,
+      description_ru: body.dish.description_ru,
+      recipe: dishRecipe(body.dish),
+    });
+    if (result.error) {
+      return NextResponse.json({ error: result.error }, { status: 400 });
+    }
+    return NextResponse.json({ dish: result.dish });
   }
 
   return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
@@ -87,23 +84,48 @@ export async function POST(request: Request) {
 export async function PATCH(request: Request) {
   const tenant = await requireTenantApi(["owner", "manager"]);
   if (!tenant.ok) return tenant.response;
-  const body = (await request.json()) as { dish?: Dish; category?: Category };
-  if (body.category) {
-    body.category = { ...body.category, restaurant_id: tenant.restaurant.id };
-  }
-  if (body.dish) {
-    const menu = await getMenu(tenant.restaurant.id);
-    const categoryOk = menu?.categories.some(
-      (category) => category.id === body.dish?.category_id,
-    );
-    const dishOk = menu?.dishes.some((dish) => dish.id === body.dish?.id);
-    if (!categoryOk || !dishOk) {
-      return NextResponse.json({ error: "Forbidden." }, { status: 403 });
+  const body = (await request.json().catch(() => null)) as {
+    dish?: Dish;
+    category?: Category;
+  } | null;
+  if (body?.dish) {
+    const result = await saveAdminDish({
+      id: body.dish.id,
+      category_id: body.dish.category_id,
+      name: body.dish.name,
+      description: body.dish.description ?? "",
+      price: Number(body.dish.price ?? 0),
+      image_url: body.dish.image_url ?? "",
+      allergens: body.dish.allergens ?? [],
+      ingredients: body.dish.ingredients ?? [],
+      is_available: body.dish.is_available ?? true,
+      calories: parseNutritionInput(body.dish.calories),
+      protein: parseNutritionInput(body.dish.protein),
+      carbs: parseNutritionInput(body.dish.carbs),
+      fat: parseNutritionInput(body.dish.fat),
+      prep_minutes: parsePrepMinutes(body.dish.prep_minutes),
+      name_en: body.dish.name_en,
+      name_ru: body.dish.name_ru,
+      description_en: body.dish.description_en,
+      description_ru: body.dish.description_ru,
+      recipe: dishRecipe(body.dish),
+    });
+    if (result.error) {
+      return NextResponse.json({ error: result.error }, { status: 400 });
     }
-    return NextResponse.json({ dish: await upsertDish(body.dish) });
+    return NextResponse.json({ dish: result.dish });
   }
-  if (body.category) {
-    return NextResponse.json({ category: await upsertCategory(body.category) });
+  if (body?.category) {
+    const result = await saveAdminCategory({
+      id: body.category.id,
+      name: body.category.name,
+      name_en: body.category.name_en,
+      name_ru: body.category.name_ru,
+    });
+    if (result.error) {
+      return NextResponse.json({ error: result.error }, { status: 400 });
+    }
+    return NextResponse.json({ category: result.category });
   }
   return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
 }
@@ -115,10 +137,9 @@ export async function DELETE(request: Request) {
   if (!id) {
     return NextResponse.json({ error: "dishId required" }, { status: 400 });
   }
-  const menu = await getMenu(tenant.restaurant.id);
-  if (!menu?.dishes.some((dish) => dish.id === id)) {
-    return NextResponse.json({ error: "Forbidden." }, { status: 403 });
+  const result = await deleteAdminDish(id);
+  if (result.error) {
+    return NextResponse.json({ error: result.error }, { status: 404 });
   }
-  const ok = await deleteDish(id);
-  return NextResponse.json({ ok });
+  return NextResponse.json({ ok: true });
 }

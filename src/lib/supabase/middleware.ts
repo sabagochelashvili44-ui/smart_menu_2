@@ -18,11 +18,15 @@ function supabaseUrl() {
 }
 
 function nextWithPathname(request: NextRequest) {
+  const pathname = request.nextUrl.pathname || "/";
   const requestHeaders = new Headers(request.headers);
-  requestHeaders.set("x-pathname", request.nextUrl.pathname);
-  return NextResponse.next({
+  requestHeaders.set("x-pathname", pathname);
+  // Some Next runtimes strip custom request headers; mirror on the response too.
+  const response = NextResponse.next({
     request: { headers: requestHeaders },
   });
+  response.headers.set("x-pathname", pathname);
+  return response;
 }
 
 function impersonateRedirect(
@@ -48,6 +52,25 @@ function impersonateRedirect(
   return redirected;
 }
 
+function isAdminPath(path: string) {
+  return (
+    path === "/admin" ||
+    path.startsWith("/admin/") ||
+    path === "/api/admin" ||
+    path.startsWith("/api/admin/")
+  );
+}
+
+function redirectToLogin(request: NextRequest) {
+  const login = request.nextUrl.clone();
+  login.pathname = "/login";
+  login.search = "";
+  if (isAdminPath(request.nextUrl.pathname)) {
+    login.searchParams.set("next", request.nextUrl.pathname);
+  }
+  return NextResponse.redirect(login, 307);
+}
+
 function signedInHome(request: NextRequest, isSuperAdmin: boolean) {
   const next = request.nextUrl.searchParams.get("next")?.trim() ?? "";
   const admin = request.nextUrl.clone();
@@ -71,9 +94,13 @@ function signedInHome(request: NextRequest, isSuperAdmin: boolean) {
 
 export async function updateSession(request: NextRequest) {
   let response = nextWithPathname(request);
+  const path = request.nextUrl.pathname;
+  const adminRoute = isAdminPath(path);
   const url = supabaseUrl();
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anonKey) return response;
+  if (!url || !anonKey) {
+    return adminRoute ? redirectToLogin(request) : response;
+  }
 
   const supabase = createServerClient(url, anonKey, {
     cookies: {
@@ -96,13 +123,11 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const path = request.nextUrl.pathname;
-  const isAdmin = path === "/admin" || path.startsWith("/admin/");
   const impersonateId =
     request.nextUrl.searchParams.get(IMPERSONATE_RESTAURANT_QUERY)?.trim() ?? "";
 
   if (
-    isAdmin &&
+    adminRoute &&
     user &&
     userLooksLikeSuperAdmin(user) &&
     RESTAURANT_ID_RE.test(impersonateId)
@@ -110,14 +135,11 @@ export async function updateSession(request: NextRequest) {
     return impersonateRedirect(request, response, impersonateId);
   }
 
-  if (isAdmin && !user) {
-    const login = request.nextUrl.clone();
-    login.pathname = "/login";
-    login.searchParams.set("next", path);
-    return NextResponse.redirect(login);
+  if (adminRoute && !user) {
+    return redirectToLogin(request);
   }
 
-  if ((path === "/login" || path === "/register") && user) {
+  if (path === "/register" && user) {
     const tenantKey =
       request.nextUrl.searchParams.get("restaurant") ??
       request.nextUrl.searchParams.get("slug");

@@ -1,13 +1,22 @@
 import { generateAnalyticsInsights, isEmptySalesMetrics, parseAdminInsightLocale } from "@/lib/ai/analytics";
 import {
+  analyticsLookbackStart,
   loadRestaurantAnalyticsContext,
-  snapshotForCreatedAtWindow,
+  loadSalesObservationCycle,
+  loadSalesSummary,
+  snapshotForWindow,
 } from "@/lib/admin-analytics-load";
 import {
+  cachedInsight,
+  insightsCacheKey,
+  storeInsight,
+} from "@/lib/ai-insight-cache";
+import {
+  comparisonRange,
   percentChange,
-  precedingEqualRange,
   resolveAnalyticsWindow,
 } from "@/lib/analytics-range";
+import { loadOpsAnalytics } from "@/lib/ops-analytics-load";
 import { computeHourlyAcknowledgedOrders } from "@/lib/overview-ops";
 import { requireTenantApi } from "@/lib/tenant";
 import { NextResponse } from "next/server";
@@ -26,15 +35,16 @@ async function loadRangedAnalytics(
     from: fromParam,
     to: toParam,
   });
-  const previous = precedingEqualRange(window.from, window.to);
+  const previous = comparisonRange(window);
 
   const context = await loadRestaurantAnalyticsContext(restaurantId, {
-    createdAtGte: previous.from.toISOString(),
-    createdAtLte: window.to.toISOString(),
+    from: analyticsLookbackStart(window.from, previous.from).toISOString(),
+    to: window.to.toISOString(),
+    includeOpen: true,
   });
 
-  const snapshot = snapshotForCreatedAtWindow(context, window.from, window.to);
-  const previousSnapshot = snapshotForCreatedAtWindow(
+  const snapshot = snapshotForWindow(context, window.from, window.to);
+  const previousSnapshot = snapshotForWindow(
     context,
     previous.from,
     previous.to,
@@ -44,6 +54,20 @@ async function loadRangedAnalytics(
     window.from,
     window.to,
   );
+  let ops = null;
+  try {
+    ops = await loadOpsAnalytics({
+      restaurantId,
+      from: window.from,
+      to: window.to,
+      events: context.intentEvents,
+      calls: context.waiterCalls,
+      dishes: context.dishes,
+      peakHours: peakHours.filter((hour) => hour.isPeak).map((hour) => hour.hour),
+    });
+  } catch {
+    ops = null;
+  }
 
   return {
     ...snapshot,
@@ -54,6 +78,7 @@ async function loadRangedAnalytics(
     windowFromYmd: window.fromYmd,
     windowToYmd: window.toYmd,
     peakHours,
+    ops,
     previous: {
       revenue: previousSnapshot.revenue,
       orderCount: previousSnapshot.orderCount,
@@ -75,7 +100,17 @@ async function loadRangedAnalytics(
         previousSnapshot.waiterCallCount,
       ),
     },
-    observationReady: true,
+    ...(await loadSalesObservationCycle(restaurantId).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : "";
+      if (!/does not exist|schema cache|could not find the/i.test(message)) {
+        throw error;
+      }
+      return {
+        observationReady: false,
+        observationDaysElapsed: 0,
+        firstAcknowledgedAt: null,
+      };
+    })),
   };
 }
 
@@ -94,7 +129,7 @@ export async function GET(request: Request) {
 
   try {
     const { range, from, to } = rangeFromRequest(request);
-    const data = await loadRangedAnalytics(tenant.restaurant.id, range, from, to);
+    const data = await loadSalesSummary(tenant.restaurant.id, range, from, to);
     return NextResponse.json(data);
   } catch (error) {
     return NextResponse.json(
@@ -113,6 +148,7 @@ export async function POST(request: Request) {
     range?: string;
     from?: string;
     to?: string;
+    refresh?: boolean;
   };
   const locale = parseAdminInsightLocale(body.locale);
   const query = rangeFromRequest(request);
@@ -127,7 +163,28 @@ export async function POST(request: Request) {
     if (isEmptySalesMetrics(snapshot)) {
       return NextResponse.json({ insights: null, empty: true });
     }
-    const insights = await generateAnalyticsInsights(snapshot, locale);
+    const cacheKey = insightsCacheKey(
+      tenant.restaurant.id,
+      locale,
+      snapshot.window,
+      snapshot.windowFrom,
+      snapshot.windowTo,
+      snapshot.revenue,
+      snapshot.orderCount,
+    );
+    const cached = body.refresh
+      ? null
+      : cachedInsight<Awaited<ReturnType<typeof generateAnalyticsInsights>>>(
+          cacheKey,
+        );
+    const insights =
+      cached ??
+      (await generateAnalyticsInsights(
+        snapshot,
+        locale,
+        tenant.restaurant.id,
+      ));
+    if (!cached) storeInsight(cacheKey, insights);
     return NextResponse.json({
       insights,
       observationReady: true,

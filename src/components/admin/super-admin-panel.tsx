@@ -4,8 +4,10 @@ import {
   createSuperAdminRestaurant,
   deleteSuperAdminRestaurant,
   enterSuperAdminViewAs,
+  resetSuperAdminAiUsage,
   toggleSuperAdminSubscription,
   updateSuperAdminRestaurant,
+  type SuperAdminHourlyBucket,
   type SuperAdminKpis,
   type SuperAdminRestaurant,
 } from "@/app/admin/super-admin/actions";
@@ -27,8 +29,10 @@ import { adminLoginUrl, getPublicAppUrl, publicMenuUrl } from "@/lib/app-url";
 import { formatGel } from "@/lib/menu-copy";
 import {
   DEFAULT_BRAND,
+  autoBrandPalette,
   brandCssVars,
   normalizeHex,
+  resolvedBrand,
   restaurantLogo,
   restaurantPublicKey,
   slugifyRestaurant,
@@ -36,6 +40,29 @@ import {
 import type { SubscriptionStatus } from "@/lib/super-admin-shared";
 import { useRouter } from "next/navigation";
 import { useEffect, useId, useMemo, useState, type CSSProperties, type FormEvent } from "react";
+
+function formatUsd(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "$0.00";
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  if (value >= 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(6)}`;
+}
+
+function formatUsdMonthly(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "$0.00";
+  if (value >= 0.01) return `$${value.toFixed(2)}`;
+  return `$${value.toFixed(4)}`;
+}
+
+function formatTokenCount(value: number) {
+  return Math.max(0, Math.round(value)).toLocaleString();
+}
+
+function formatCap(used: number, limit: number | null | undefined, unlimited: string) {
+  const usedLabel = formatTokenCount(used);
+  if (!limit) return `${usedLabel} / ${unlimited}`;
+  return `${usedLabel} / ${formatTokenCount(limit)}`;
+}
 
 function toDatetimeLocal(iso: string | null) {
   if (!iso) return "";
@@ -48,9 +75,11 @@ function toDatetimeLocal(iso: string | null) {
 export function SuperAdminPanel({
   kpis,
   restaurants,
+  hourly = [],
 }: {
   kpis: SuperAdminKpis;
   restaurants: SuperAdminRestaurant[];
+  hourly?: SuperAdminHourlyBucket[];
 }) {
   const { t } = useAdminLocale();
   const router = useRouter();
@@ -70,8 +99,34 @@ export function SuperAdminPanel({
       activeSubscribers: active.length,
       mrr: active.reduce((sum, row) => sum + row.subscription_fee, 0),
       totalOrders: kpis.totalOrders,
+      aiCostUsd: restaurants.reduce((sum, row) => sum + (row.ai_cost_usd ?? 0), 0),
+      aiMonthlyUsd: restaurants.reduce(
+        (sum, row) => sum + (row.ai_monthly_projected_usd ?? 0),
+        0,
+      ),
+      aiAlertCount:
+        kpis.ai_alert_count ??
+        restaurants.filter((row) => row.ai_alert && row.ai_alert !== "ok").length,
     };
-  }, [kpis.totalOrders, restaurants]);
+  }, [kpis.ai_alert_count, kpis.totalOrders, restaurants]);
+
+  const alerted = useMemo(
+    () => restaurants.filter((row) => row.ai_alert && row.ai_alert !== "ok"),
+    [restaurants],
+  );
+
+  useEffect(() => {
+    const refresh = () => router.refresh();
+    const interval = window.setInterval(refresh, 15_000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [router]);
 
   async function onViewAs(id: string) {
     setBusyId(id);
@@ -98,14 +153,61 @@ export function SuperAdminPanel({
     router.refresh();
   }
 
+  async function onResetTokens(row: SuperAdminRestaurant) {
+    if (!window.confirm(t.resetTokensConfirm.replace("{name}", row.name))) return;
+    setBusyId(row.id);
+    await resetSuperAdminAiUsage(row.id);
+    setBusyId(null);
+    router.refresh();
+  }
+
   return (
     <div className="space-y-6">
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-7">
         <Kpi title={t.totalRestaurants} value={String(derivedKpis.totalRestaurants)} />
         <Kpi title={t.activeSubscribers} value={String(derivedKpis.activeSubscribers)} />
         <Kpi title={t.monthlyRevenue} value={formatGel(derivedKpis.mrr)} />
         <Kpi title={t.networkOrders} value={String(derivedKpis.totalOrders)} />
+        <Kpi title={t.networkAiSpend} value={formatUsd(derivedKpis.aiCostUsd)} />
+        <Kpi title={t.networkAiMonthly} value={`${formatUsdMonthly(derivedKpis.aiMonthlyUsd)} / ${t.aiPerMonth}`} />
+        <Kpi title={t.networkAiAlerts} value={String(derivedKpis.aiAlertCount)} />
       </div>
+
+      {alerted.length > 0 ? (
+        <div
+          className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm"
+          role="status"
+        >
+          <p className="font-medium">{t.aiAlertBanner}</p>
+          <ul className="mt-2 space-y-1">
+            {alerted.map((row) => (
+              <li key={row.id} className="text-muted-foreground">
+                {t.aiAlertToday
+                  .replace("{name}", row.name)
+                  .replace("{used}", formatTokenCount(row.ai_tokens_today ?? 0))
+                  .replace(
+                    "{limit}",
+                    row.ai_daily_token_limit
+                      ? formatTokenCount(row.ai_daily_token_limit)
+                      : t.aiCapUnlimited,
+                  )}
+                {" · "}
+                {t.aiAlertWeek
+                  .replace("{name}", row.name)
+                  .replace("{used}", formatTokenCount(row.ai_tokens_week ?? 0))
+                  .replace(
+                    "{limit}",
+                    row.ai_weekly_token_limit
+                      ? formatTokenCount(row.ai_weekly_token_limit)
+                      : t.aiCapUnlimited,
+                  )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <HourlyUsageChart hourly={hourly} />
 
       <div className="flex justify-end">
         <Button type="button" onClick={() => setCreateOpen(true)}>
@@ -113,24 +215,24 @@ export function SuperAdminPanel({
         </Button>
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-secondary/30">
-        <table className="w-full min-w-[960px] text-left text-sm">
-          <thead className="bg-muted/50 text-muted-foreground">
-            <tr>
-              <th className="px-3 py-2 font-medium">{t.restaurantName}</th>
-              <th className="px-3 py-2 font-medium">{t.slug}</th>
-              <th className="px-3 py-2 font-medium">{t.managerEmail}</th>
-              <th className="px-3 py-2 font-medium">{t.subscriptionStatus}</th>
-              <th className="px-3 py-2 font-medium">{t.monthlyFee}</th>
-              <th className="px-3 py-2 font-medium">{t.tenantOrders}</th>
-              <th className="px-3 py-2 font-medium">{t.expirationDate}</th>
-              <th className="px-3 py-2 font-medium">{t.actions}</th>
+      <div className="overflow-x-auto rounded-2xl border border-secondary/30">
+        <table className="w-full min-w-280 text-left text-sm">
+          <thead className="bg-muted/40 text-muted-foreground">
+            <tr className="text-xs tracking-wide uppercase">
+              <th className="px-4 py-3 font-medium">{t.restaurantName}</th>
+              <th className="px-4 py-3 font-medium">{t.aiPlan}</th>
+              <th className="px-4 py-3 font-medium">{t.tenantOwner}</th>
+              <th className="px-4 py-3 font-medium">{t.subscriptionStatus}</th>
+              <th className="px-4 py-3 font-medium">{t.geminiTokenUsage}</th>
+              <th className="px-4 py-3 font-medium">{t.tenantAiCost}</th>
+              <th className="px-4 py-3 font-medium">{t.resetTokens}</th>
+              <th className="px-4 py-3 font-medium">{t.tenantManage}</th>
             </tr>
           </thead>
           <tbody>
             {restaurants.length === 0 ? (
               <tr>
-                <td className="text-muted-foreground px-3 py-6" colSpan={8}>
+                <td className="text-muted-foreground px-4 py-8" colSpan={8}>
                   {t.noTenants}
                 </td>
               </tr>
@@ -139,82 +241,129 @@ export function SuperAdminPanel({
                 const slug = restaurantPublicKey(row);
                 const expired =
                   row.valid_until && new Date(row.valid_until).getTime() < Date.now();
+                const rowTone =
+                  row.ai_alert === "over"
+                    ? "border-t border-secondary/20 bg-destructive/5"
+                    : row.ai_alert === "warn"
+                      ? "border-t border-secondary/20 bg-amber-500/5"
+                      : "border-t border-secondary/20";
                 return (
-                  <tr key={row.id} className="border-t border-secondary/20">
-                    <td className="px-3 py-2 font-medium">{row.name}</td>
-                    <td className="px-3 py-2 font-mono text-xs">{row.slug ?? "—"}</td>
-                    <td className="px-3 py-2">{row.manager_email ?? "—"}</td>
-                    <td className="px-3 py-2">
-                      <StatusBadge status={row.subscription_status} expired={Boolean(expired)} />
-                    </td>
-                    <td className="px-3 py-2 tabular-nums">
-                      {formatGel(row.subscription_fee)}
-                    </td>
-                    <td className="px-3 py-2">
-                      <Badge
-                        variant="secondary"
-                        className="h-auto min-h-5 py-1 tabular-nums font-semibold"
-                      >
+                  <tr key={row.id} className={rowTone}>
+                    <td className="px-4 py-4 align-top">
+                      <div className="font-semibold leading-tight">{row.name}</div>
+                      <p className="text-muted-foreground mt-1 font-mono text-[11px]">
+                        {row.slug ?? "—"}
+                      </p>
+                      <p className="text-muted-foreground mt-2 text-[11px] tabular-nums">
                         {t.tenantOrderCount.replace(
                           "{count}",
                           String(row.order_count ?? 0),
                         )}
-                      </Badge>
+                      </p>
                     </td>
-                    <td className="px-3 py-2 tabular-nums">
-                      {row.valid_until
-                        ? new Date(row.valid_until).toLocaleDateString()
-                        : "—"}
+                    <td className="px-4 py-4 align-top">
+                      <AiPlanBadge plan={row.ai_plan} />
                     </td>
-                    <td className="px-3 py-2">
-                      <div className="flex flex-wrap gap-1">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={busyId === row.id}
-                          onClick={() => void onViewAs(row.id)}
-                        >
-                          {t.viewAsManager}
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={busyId === row.id}
-                          onClick={() => void onToggle(row.id)}
-                        >
-                          {row.subscription_status === "active"
-                            ? t.suspendTenant
-                            : t.activateTenant}
-                        </Button>
-                        <a
-                          href={`/menu/${slug}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-sm font-medium underline-offset-4 hover:underline"
-                        >
-                          {t.openMenu}
-                        </a>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => setEditing(row)}
-                        >
-                          {t.editTenant}
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          disabled={busyId === row.id}
-                          onClick={() => void onDelete(row)}
-                        >
-                          {t.deleteTenant}
-                        </Button>
+                    <td className="px-4 py-4 align-top">
+                      <p className="max-w-48 truncate">{row.manager_email ?? "—"}</p>
+                    </td>
+                    <td className="px-4 py-4 align-top">
+                      <StatusBadge
+                        status={row.subscription_status}
+                        expired={Boolean(expired)}
+                      />
+                      <p className="text-muted-foreground mt-2 text-[11px] tabular-nums">
+                        {formatGel(row.subscription_fee)}
+                        {row.valid_until
+                          ? ` · ${new Date(row.valid_until).toLocaleDateString()}`
+                          : ""}
+                      </p>
+                    </td>
+                    <td className="px-4 py-4 align-top">
+                      <GeminiUsageCell restaurant={row} />
+                    </td>
+                    <td className="px-4 py-4 align-top">
+                      <div className="min-w-32 space-y-1">
+                        <div className="text-base font-semibold tabular-nums">
+                          {formatUsd(row.ai_cost_usd ?? 0)}
+                        </div>
+                        <p className="text-muted-foreground text-[11px] tabular-nums">
+                          {t.tenantAiMonthly}: {formatUsdMonthly(row.ai_monthly_projected_usd ?? 0)}
+                          {` / ${t.aiPerMonth}`}
+                        </p>
+                        {(row.ai_heavy_monthly_usd ?? 0) >
+                        (row.ai_monthly_projected_usd ?? 0) * 1.15 ? (
+                          <p className="text-[11px] tabular-nums">
+                            {t.tenantAiHeavyMonthly}:{" "}
+                            {formatUsdMonthly(row.ai_heavy_monthly_usd ?? 0)}
+                            {` / ${t.aiPerMonth}`}
+                          </p>
+                        ) : null}
                       </div>
-                      <div className="mt-2 max-w-xs">
+                    </td>
+                    <td className="px-4 py-4 align-top">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="whitespace-nowrap"
+                        disabled={busyId === row.id}
+                        onClick={() => void onResetTokens(row)}
+                      >
+                        {t.resetTokens}
+                      </Button>
+                    </td>
+                    <td className="px-4 py-4 align-top">
+                      <div className="flex max-w-72 flex-col gap-1.5">
+                        <div className="flex flex-wrap gap-1.5">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={busyId === row.id}
+                            onClick={() => void onViewAs(row.id)}
+                          >
+                            {t.viewAsManager}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={busyId === row.id}
+                            onClick={() => void onToggle(row.id)}
+                          >
+                            {row.subscription_status === "active"
+                              ? t.suspendTenant
+                              : t.activateTenant}
+                          </Button>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <a
+                            href={`/menu/${slug}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-sm font-medium underline-offset-4 hover:underline"
+                          >
+                            {t.openMenu}
+                          </a>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setEditing(row)}
+                          >
+                            {t.editTenant}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            disabled={busyId === row.id}
+                            onClick={() => void onDelete(row)}
+                          >
+                            {t.deleteTenant}
+                          </Button>
+                        </div>
                         <CopyLinkField url={adminLoginUrl(slug)} />
                       </div>
                     </td>
@@ -259,6 +408,178 @@ export function SuperAdminPanel({
         }}
       />
     </div>
+  );
+}
+
+function AiPlanBadge({ plan }: { plan: SuperAdminRestaurant["ai_plan"] }) {
+  const { t } = useAdminLocale();
+  const paid = plan === "paid";
+  return (
+    <Badge variant={paid ? "default" : "outline"} className="font-medium">
+      {paid ? t.aiPlanPaid : t.aiPlanFree}
+    </Badge>
+  );
+}
+
+function usagePercent(used: number, limit: number | null | undefined) {
+  if (!limit || limit <= 0) return 0;
+  return Math.min(100, Math.round((Math.max(0, used) / limit) * 100));
+}
+
+function UsageMeter({
+  label,
+  used,
+  limit,
+}: {
+  label: string;
+  used: number;
+  limit: number | null | undefined;
+}) {
+  const { t } = useAdminLocale();
+  const percent = usagePercent(used, limit);
+  const tone =
+    percent >= 100
+      ? "bg-destructive"
+      : percent >= 80
+        ? "bg-amber-500"
+        : "bg-primary";
+  return (
+    <div className="space-y-1">
+      <div className="text-muted-foreground flex items-center justify-between gap-3 text-[11px]">
+        <span>{label}</span>
+        <span className="tabular-nums">
+          {formatCap(used, limit, t.aiCapUnlimited)}
+        </span>
+      </div>
+      {limit ? (
+        <div className="bg-muted h-1.5 overflow-hidden rounded-full">
+          <div
+            className={`h-full rounded-full ${tone}`}
+            style={{ width: `${percent}%` }}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function GeminiUsageCell({ restaurant }: { restaurant: SuperAdminRestaurant }) {
+  const { t } = useAdminLocale();
+  const topModel = (restaurant.ai_models ?? []).find(
+    (model) => (model.provider || "gemini") !== "openai",
+  );
+  return (
+    <div className="min-w-56 max-w-72 space-y-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-base font-semibold tabular-nums">
+          {formatTokenCount(restaurant.ai_total_tokens ?? 0)}
+        </span>
+        <Badge variant="secondary" className="shrink-0">
+          Gemini
+        </Badge>
+      </div>
+      <UsageMeter
+        label={t.aiUsageTodayShort}
+        used={restaurant.ai_tokens_today ?? 0}
+        limit={restaurant.ai_daily_token_limit}
+      />
+      <UsageMeter
+        label={t.aiUsageWeekShort}
+        used={restaurant.ai_tokens_week ?? 0}
+        limit={restaurant.ai_weekly_token_limit}
+      />
+      {topModel ? (
+        <p className="text-muted-foreground truncate font-mono text-[11px]">
+          {topModel.model}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function HourlyUsageChart({ hourly }: { hourly: SuperAdminHourlyBucket[] }) {
+  const { t } = useAdminLocale();
+  const [mode, setMode] = useState<"chat" | "all">("chat");
+  const buckets = useMemo(() => {
+    const filled = Array.from({ length: 24 }, (_, hour) => {
+      const found = hourly.find((row) => row.hour === hour);
+      return (
+        found ?? {
+          hour,
+          chatCalls: 0,
+          allCalls: 0,
+          chatTokens: 0,
+          totalTokens: 0,
+        }
+      );
+    });
+    return filled;
+  }, [hourly]);
+  const values = buckets.map((row) =>
+    mode === "chat" ? row.chatCalls : row.allCalls,
+  );
+  const peak = Math.max(0, ...values);
+  const hasUsage = buckets.some((row) => row.allCalls > 0);
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3 space-y-0">
+        <div className="space-y-1">
+          <CardTitle>{t.aiUsageChart}</CardTitle>
+          <p className="text-muted-foreground text-xs">{t.aiUsageChartHint}</p>
+        </div>
+        <div className="flex gap-1">
+          <Button
+            type="button"
+            size="sm"
+            variant={mode === "chat" ? "default" : "outline"}
+            onClick={() => setMode("chat")}
+          >
+            {t.aiUsageChatOnly}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={mode === "all" ? "default" : "outline"}
+            onClick={() => setMode("all")}
+          >
+            {t.aiUsageAllFeatures}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {!hasUsage ? (
+          <p className="text-muted-foreground text-sm">{t.aiNoUsageYet}</p>
+        ) : (
+          <div className="flex h-36 items-end gap-1">
+            {buckets.map((row, index) => {
+              const value = values[index] ?? 0;
+              const height = peak ? Math.max(value > 0 ? 6 : 0, (value / peak) * 100) : 0;
+              const tokens = mode === "chat" ? row.chatTokens : row.totalTokens;
+              return (
+                <div
+                  key={row.hour}
+                  className="flex min-w-0 flex-1 flex-col items-center justify-end gap-1"
+                  title={`${String(row.hour).padStart(2, "0")}:00 · ${value} · ${formatTokenCount(tokens)}`}
+                >
+                  <div
+                    className="bg-primary w-full rounded-sm"
+                    style={{ height: `${height}%` }}
+                  />
+                  {row.hour % 3 === 0 ? (
+                    <span className="text-muted-foreground text-[10px] tabular-nums">
+                      {row.hour}
+                    </span>
+                  ) : (
+                    <span className="h-3" />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -337,21 +658,46 @@ function TenantDialog({
   const [googleMapsUrl, setGoogleMapsUrl] = useState(
     restaurant?.google_maps_review_url ?? restaurant?.google_review_url ?? "",
   );
+  const [aiPlan, setAiPlan] = useState<SuperAdminRestaurant["ai_plan"]>(
+    restaurant?.ai_plan ?? "free",
+  );
+  const [dailyLimit, setDailyLimit] = useState(
+    restaurant
+      ? restaurant.ai_daily_token_limit == null
+        ? ""
+        : String(restaurant.ai_daily_token_limit)
+      : "50000",
+  );
+  const [weeklyLimit, setWeeklyLimit] = useState(
+    restaurant
+      ? restaurant.ai_weekly_token_limit == null
+        ? ""
+        : String(restaurant.ai_weekly_token_limit)
+      : "350000",
+  );
   const [status, setStatus] = useState<SubscriptionStatus>(
     restaurant?.subscription_status ?? "trial",
   );
   const [validUntil, setValidUntil] = useState(
     toDatetimeLocal(restaurant?.valid_until ?? null),
   );
-  const [primary, setPrimary] = useState(
-    normalizeHex(restaurant?.primary_color, DEFAULT_BRAND.primary_color),
+  const initialBrand = useMemo(() => resolvedBrand(restaurant), [restaurant]);
+  const [primary, setPrimary] = useState(initialBrand.primary);
+  const [secondary, setSecondary] = useState(initialBrand.secondary);
+  const [bg, setBg] = useState(initialBrand.background);
+  const [textColor, setTextColor] = useState(initialBrand.foreground);
+  const [mutedTextColor, setMutedTextColor] = useState(
+    initialBrand.mutedForeground,
   );
-  const [secondary, setSecondary] = useState(
-    normalizeHex(restaurant?.secondary_color, DEFAULT_BRAND.secondary_color),
+  const [primaryTextColor, setPrimaryTextColor] = useState(
+    initialBrand.onPrimary,
   );
-  const [bg, setBg] = useState(
-    normalizeHex(restaurant?.bg_color, DEFAULT_BRAND.bg_color),
+  const [secondaryTextColor, setSecondaryTextColor] = useState(
+    initialBrand.onSecondary,
   );
+  const [priceColor, setPriceColor] = useState(initialBrand.priceColor);
+  const [cardColor, setCardColor] = useState(initialBrand.card);
+  const [borderColor, setBorderColor] = useState(initialBrand.border);
   const [logoUrl, setLogoUrl] = useState(restaurantLogo(restaurant ?? {}) ?? "");
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
 
@@ -359,6 +705,7 @@ function TenantDialog({
 
   useEffect(() => {
     if (!open) return;
+    const resolved = resolvedBrand(restaurant);
     setName(restaurant?.name ?? "");
     setSlug(restaurant?.slug ?? "");
     setEmail(restaurant?.manager_email ?? "");
@@ -368,12 +715,32 @@ function TenantDialog({
       restaurant?.google_maps_review_url ?? restaurant?.google_review_url ?? "",
     );
     setStatus(restaurant?.subscription_status ?? "trial");
-    setValidUntil(toDatetimeLocal(restaurant?.valid_until ?? null));
-    setPrimary(normalizeHex(restaurant?.primary_color, DEFAULT_BRAND.primary_color));
-    setSecondary(
-      normalizeHex(restaurant?.secondary_color, DEFAULT_BRAND.secondary_color),
+    setAiPlan(restaurant?.ai_plan ?? "free");
+    setDailyLimit(
+      restaurant
+        ? restaurant.ai_daily_token_limit == null
+          ? ""
+          : String(restaurant.ai_daily_token_limit)
+        : "50000",
     );
-    setBg(normalizeHex(restaurant?.bg_color, DEFAULT_BRAND.bg_color));
+    setWeeklyLimit(
+      restaurant
+        ? restaurant.ai_weekly_token_limit == null
+          ? ""
+          : String(restaurant.ai_weekly_token_limit)
+        : "350000",
+    );
+    setValidUntil(toDatetimeLocal(restaurant?.valid_until ?? null));
+    setPrimary(resolved.primary);
+    setSecondary(resolved.secondary);
+    setBg(resolved.background);
+    setTextColor(resolved.foreground);
+    setMutedTextColor(resolved.mutedForeground);
+    setPrimaryTextColor(resolved.onPrimary);
+    setSecondaryTextColor(resolved.onSecondary);
+    setPriceColor(resolved.priceColor);
+    setCardColor(resolved.card);
+    setBorderColor(resolved.border);
     setLogoUrl(restaurantLogo(restaurant ?? {}) ?? "");
     setLogoPreview(null);
     setError(null);
@@ -393,9 +760,44 @@ function TenantDialog({
         primary_color: primary,
         secondary_color: secondary,
         bg_color: bg,
+        text_color: textColor,
+        muted_text_color: mutedTextColor,
+        primary_text_color: primaryTextColor,
+        secondary_text_color: secondaryTextColor,
+        price_color: priceColor,
+        card_color: cardColor,
+        border_color: borderColor,
       }) as CSSProperties,
-    [restaurant?.id, name, primary, secondary, bg],
+    [
+      restaurant?.id,
+      name,
+      primary,
+      secondary,
+      bg,
+      textColor,
+      mutedTextColor,
+      primaryTextColor,
+      secondaryTextColor,
+      priceColor,
+      cardColor,
+      borderColor,
+    ],
   );
+
+  function applyAutoContrast() {
+    const auto = autoBrandPalette({
+      primary_color: primary,
+      secondary_color: secondary,
+      bg_color: bg,
+    });
+    setTextColor(auto.text_color);
+    setMutedTextColor(auto.muted_text_color);
+    setPrimaryTextColor(auto.primary_text_color);
+    setSecondaryTextColor(auto.secondary_text_color);
+    setPriceColor(auto.price_color);
+    setCardColor(auto.card_color);
+    setBorderColor(auto.border_color);
+  }
 
   const previewLogo = logoPreview || logoUrl;
   const previewSlug = slugifyRestaurant(slug || name) || "machakhela";
@@ -422,10 +824,23 @@ function TenantDialog({
     form.set("google_maps_review_url", googleMapsUrl);
     form.set("google_review_url", googleMapsUrl);
     form.set("subscription_status", status);
+    form.set("ai_plan", aiPlan);
+    form.set("ai_daily_token_limit", dailyLimit);
+    form.set("ai_weekly_token_limit", weeklyLimit);
     form.set("valid_until", validUntil);
-    form.set("primary_color", primary);
-    form.set("secondary_color", secondary);
-    form.set("bg_color", bg);
+    form.set("primary_color", normalizeHex(primary, DEFAULT_BRAND.primary_color));
+    form.set(
+      "secondary_color",
+      normalizeHex(secondary, DEFAULT_BRAND.secondary_color),
+    );
+    form.set("bg_color", normalizeHex(bg, DEFAULT_BRAND.bg_color));
+    form.set("text_color", textColor);
+    form.set("muted_text_color", mutedTextColor);
+    form.set("primary_text_color", primaryTextColor);
+    form.set("secondary_text_color", secondaryTextColor);
+    form.set("price_color", priceColor);
+    form.set("card_color", cardColor);
+    form.set("border_color", borderColor);
     form.set("logo_url", logoUrl);
     const result = restaurant
       ? await updateSuperAdminRestaurant(form)
@@ -505,47 +920,115 @@ function TenantDialog({
           </section>
 
           <section className="space-y-3">
-            <h3 className="text-sm font-semibold">{t.tenantVisuals}</h3>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold">{t.tenantVisuals}</h3>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={(event) => {
+                  event.preventDefault();
+                  applyAutoContrast();
+                }}
+              >
+                {t.autoContrastColors}
+              </Button>
+            </div>
             <div className="grid gap-4 lg:grid-cols-[1fr_240px]">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <ColorField
-                  label={t.primaryVar}
-                  value={primary}
-                  onChange={setPrimary}
-                />
-                <ColorField
-                  label={t.secondaryVar}
-                  value={secondary}
-                  onChange={setSecondary}
-                />
-                <ColorField label={t.bgVar} value={bg} onChange={setBg} />
-                <Field label={t.logo}>
-                  <Input
-                    name="logo"
-                    type="file"
-                    accept="image/*"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (logoPreview) URL.revokeObjectURL(logoPreview);
-                      setLogoPreview(file ? URL.createObjectURL(file) : null);
-                    }}
+              <div className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <ColorField
+                    label={t.primaryVar}
+                    value={primary}
+                    onChange={setPrimary}
                   />
-                </Field>
-                <div className="sm:col-span-2">
-                  <Field label={t.logoUrl}>
+                  <ColorField
+                    label={t.secondaryVar}
+                    value={secondary}
+                    onChange={setSecondary}
+                  />
+                  <ColorField label={t.bgVar} value={bg} onChange={setBg} />
+                  <Field label={t.logo}>
                     <Input
-                      value={logoUrl}
-                      onChange={(e) => setLogoUrl(e.target.value)}
-                      placeholder="https://"
+                      name="logo"
+                      type="file"
+                      accept="image/*"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (logoPreview) URL.revokeObjectURL(logoPreview);
+                        setLogoPreview(file ? URL.createObjectURL(file) : null);
+                      }}
                     />
                   </Field>
+                  <div className="sm:col-span-2">
+                    <Field label={t.logoUrl}>
+                      <Input
+                        value={logoUrl}
+                        onChange={(e) => setLogoUrl(e.target.value)}
+                        placeholder="https://"
+                      />
+                    </Field>
+                  </div>
+                </div>
+                <div className="border-border/60 space-y-2 rounded-lg border p-3">
+                  <p className="text-xs font-semibold">{t.wordColorsSection}</p>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <ColorField
+                      label={t.textColor}
+                      value={textColor}
+                      onChange={setTextColor}
+                    />
+                    <ColorField
+                      label={t.mutedTextColor}
+                      value={mutedTextColor}
+                      onChange={setMutedTextColor}
+                    />
+                    <ColorField
+                      label={t.priceColor}
+                      value={priceColor}
+                      onChange={setPriceColor}
+                    />
+                    <ColorField
+                      label={t.primaryTextColor}
+                      value={primaryTextColor}
+                      onChange={setPrimaryTextColor}
+                    />
+                    <ColorField
+                      label={t.secondaryTextColor}
+                      value={secondaryTextColor}
+                      onChange={setSecondaryTextColor}
+                    />
+                  </div>
+                </div>
+                <div className="border-border/60 space-y-2 rounded-lg border p-3">
+                  <p className="text-xs font-semibold">{t.surfaceColorsSection}</p>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <ColorField
+                      label={t.cardColor}
+                      value={cardColor}
+                      onChange={setCardColor}
+                    />
+                    <ColorField
+                      label={t.borderColor}
+                      value={borderColor}
+                      onChange={setBorderColor}
+                    />
+                  </div>
                 </div>
               </div>
               <aside
-                className="rounded-xl border border-secondary/30 p-4"
-                style={previewVars}
+                className="space-y-3 rounded-xl border p-4"
+                style={{
+                  ...previewVars,
+                  backgroundColor: bg,
+                  color: textColor,
+                  borderColor,
+                }}
               >
-                <p className="text-muted-foreground mb-3 text-xs uppercase tracking-wide">
+                <p
+                  className="text-xs uppercase tracking-wide"
+                  style={{ color: mutedTextColor }}
+                >
                   {t.preview}
                 </p>
                 <div className="flex items-center gap-3">
@@ -557,27 +1040,66 @@ function TenantDialog({
                       className="size-12 rounded-full object-cover ring-1 ring-foreground/10"
                     />
                   ) : (
-                    <div className="bg-muted flex size-12 items-center justify-center rounded-full text-lg font-semibold">
+                    <div
+                      className="flex size-12 items-center justify-center rounded-full text-lg font-semibold"
+                      style={{ backgroundColor: cardColor, color: textColor }}
+                    >
                       {(name || "R").slice(0, 1)}
                     </div>
                   )}
                   <div className="min-w-0">
-                    <p className="truncate font-semibold">{name || t.tenantName}</p>
-                    <p className="text-muted-foreground truncate text-xs">
+                    <p
+                      className="truncate font-semibold"
+                      style={{ color: textColor }}
+                    >
+                      {name || t.tenantName}
+                    </p>
+                    <p
+                      className="truncate text-xs"
+                      style={{ color: mutedTextColor }}
+                    >
                       /menu/{previewSlug}
                     </p>
                   </div>
                 </div>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <span className="bg-primary text-primary-foreground rounded-md px-2 py-1 text-xs">
-                    --primary
-                  </span>
-                  <span className="bg-secondary text-secondary-foreground rounded-md px-2 py-1 text-xs">
-                    --secondary
-                  </span>
-                  <span className="rounded-md border border-foreground/15 px-2 py-1 text-xs">
-                    --background
-                  </span>
+                <div
+                  className="space-y-2 rounded-lg border p-2.5"
+                  style={{ backgroundColor: cardColor, borderColor }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span
+                      className="truncate text-xs font-semibold"
+                      style={{ color: textColor }}
+                    >
+                      {t.previewSampleDish}
+                    </span>
+                    <span
+                      className="text-xs font-semibold tabular-nums"
+                      style={{ color: priceColor }}
+                    >
+                      ₾24.00
+                    </span>
+                  </div>
+                  <p className="text-[11px]" style={{ color: mutedTextColor }}>
+                    {t.previewSampleDesc}
+                  </p>
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    <span
+                      className="rounded-md px-2 py-0.5 text-[11px] font-medium"
+                      style={{ backgroundColor: primary, color: primaryTextColor }}
+                    >
+                      Primary
+                    </span>
+                    <span
+                      className="rounded-md px-2 py-0.5 text-[11px] font-medium"
+                      style={{
+                        backgroundColor: secondary,
+                        color: secondaryTextColor,
+                      }}
+                    >
+                      Secondary
+                    </span>
+                  </div>
                 </div>
               </aside>
             </div>
@@ -616,6 +1138,45 @@ function TenantDialog({
                 />
               </Field>
             </div>
+          </section>
+
+          <section className="space-y-3">
+            <h3 className="text-sm font-semibold">{t.tenantAiOps}</h3>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Field label={t.aiPlan}>
+                <select
+                  value={aiPlan}
+                  onChange={(e) =>
+                    setAiPlan(e.target.value === "paid" ? "paid" : "free")
+                  }
+                  className="border-input h-8 w-full rounded-lg border bg-transparent px-2.5 text-sm"
+                >
+                  <option value="free">{t.aiPlanFree}</option>
+                  <option value="paid">{t.aiPlanPaid}</option>
+                </select>
+              </Field>
+              <Field label={t.aiDailyTokenLimit}>
+                <Input
+                  type="number"
+                  min="0"
+                  step="1000"
+                  value={dailyLimit}
+                  onChange={(e) => setDailyLimit(e.target.value)}
+                  placeholder={t.aiCapUnlimited}
+                />
+              </Field>
+              <Field label={t.aiWeeklyTokenLimit}>
+                <Input
+                  type="number"
+                  min="0"
+                  step="1000"
+                  value={weeklyLimit}
+                  onChange={(e) => setWeeklyLimit(e.target.value)}
+                  placeholder={t.aiCapUnlimited}
+                />
+              </Field>
+            </div>
+            <p className="text-muted-foreground text-xs">{t.aiTokenLimitHint}</p>
           </section>
 
           {error ? <p className="text-destructive text-sm">{error}</p> : null}
@@ -665,16 +1226,22 @@ function ColorField({
   value: string;
   onChange: (next: string) => void;
 }) {
+  const pickerValue = normalizeHex(value, "#000000");
   return (
     <Field label={label}>
       <div className="flex items-center gap-2">
         <input
+          key={pickerValue}
           type="color"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
+          value={pickerValue}
+          onChange={(e) => onChange(e.target.value.toLowerCase())}
           className="border-input h-8 w-10 cursor-pointer rounded border bg-transparent p-0.5"
         />
-        <Input value={value} onChange={(e) => onChange(e.target.value)} />
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="border-input bg-transparent h-8 min-w-0 flex-1 rounded-lg border px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        />
       </div>
     </Field>
   );

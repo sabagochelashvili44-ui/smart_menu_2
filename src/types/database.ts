@@ -32,6 +32,8 @@ export type Category = {
   restaurant_id: string;
   name: string;
   order_index: number;
+  name_en?: string | null;
+  name_ru?: string | null;
   translations: { en: string } & Partial<Record<Lang, string>>;
 };
 
@@ -47,6 +49,15 @@ export type Dish = {
   ingredients: string[];
   is_available: boolean;
   wine_pairing: string;
+  calories?: number | null;
+  protein?: number | null;
+  carbs?: number | null;
+  fat?: number | null;
+  prep_minutes?: number | null;
+  name_en?: string | null;
+  name_ru?: string | null;
+  description_en?: string | null;
+  description_ru?: string | null;
   translations: { en: { name: string; description: string } } & Partial<
     Record<Lang, { name: string; description: string }>
   >;

@@ -1,11 +1,14 @@
 "use client";
 
-import { DishCardImage } from "@/components/guest/dish-card";
+import { DishCardImage, DishNutritionFacts } from "@/components/guest/dish-card";
 import { AiChatbot } from "@/components/menu/ai-chatbot";
 import { ChefNavBubble } from "@/components/menu/digital-host-widget";
-import { CartDrawer, type CartLine } from "@/components/menu/cart-drawer";
-import { applyQuantityDelta, cartSubtotal } from "@/components/menu/guest-cart";
+import { CartDrawer } from "@/components/menu/cart-drawer";
+import { cartSubtotal } from "@/components/menu/guest-cart";
+import { useSharedTableCart } from "@/components/menu/use-shared-table-cart";
+import { GuestTicketStatus, type GuestTicket } from "@/components/menu/guest-ticket-status";
 import { useGuestWeather } from "@/components/menu/use-guest-weather";
+import { useLiveGuestMenu } from "@/components/menu/use-live-guest-menu";
 import { CrossSellSection } from "@/components/menu/cross-sell-section";
 import { QuantityStepper } from "@/components/menu/quantity-stepper";
 import { ServiceFeedbackDialog } from "@/components/menu/service-feedback-dialog";
@@ -15,27 +18,41 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   allergenLabel,
-  categoryLabel,
   dishDescription,
+  categoryNameFromFields,
+  dishDescriptionFromFields,
   dishLabel,
+  dishNameFromFields,
   formatGel,
   formatGuestTableLabel,
   ingredientLabel,
+  storedLocaleText,
   type MenuLocale,
   ui,
 } from "@/lib/menu-copy";
 import { useMenuTranslations } from "@/lib/use-menu-translations";
 import { type CrossSellDish } from "@/lib/cross-sell";
+import {
+  availablePours,
+  priceForPour,
+  type DrinkPour,
+} from "@/lib/menu-lane";
 import { emptyDietFilter, type DietFilter } from "@/lib/guest-diet";
 import { pickContextUpsells } from "@/lib/recommendations";
 import { looksLikeCulinaryQuestion } from "@/lib/host-query";
-import { trackGuestIntent } from "@/lib/guest-intent";
+import {
+  bindGuestIntentSession,
+  setDishAttention,
+  trackGuestIntent,
+  trackOffMenuRequest,
+} from "@/lib/guest-intent";
 import {
   cartTotals,
   parseServiceFeePercent,
   restaurantGoogleMapsUrl,
   syncServiceFeeLine,
 } from "@/lib/service-fee";
+import type { RestaurantAiPrompt } from "@/lib/restaurant-ai-prompts-shared";
 import type { WaiterCallType } from "@/lib/waiter-call-types";
 import { BellIcon, SearchIcon, SparklesIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -58,6 +75,8 @@ export type MenuCategory = {
   id: string;
   name: string;
   order_index: number;
+  name_en?: string | null;
+  name_ru?: string | null;
 };
 
 export type MenuDish = {
@@ -66,40 +85,70 @@ export type MenuDish = {
   name: string;
   description: string;
   price: number;
+  bottle_price?: number | null;
+  glass_price?: number | null;
   image_url: string | null;
   allergens: string[] | null;
   is_available: boolean;
   ingredients?: string[] | null;
   wine_pairing?: string | null;
+  calories?: number | null;
+  protein?: number | null;
+  carbs?: number | null;
+  fat?: number | null;
+  prep_minutes?: number | null;
+  name_en?: string | null;
+  name_ru?: string | null;
+  description_en?: string | null;
+  description_ru?: string | null;
 };
 
 export function RestaurantMenu({
   restaurant,
   table,
-  categories,
-  dishes,
+  categories: initialCategories,
+  dishes: initialDishes,
+  quickPrompts = null,
 }: {
   restaurant: MenuRestaurant;
   table: MenuTable | null;
   categories: MenuCategory[];
   dishes: MenuDish[];
+  quickPrompts?: RestaurantAiPrompt[] | null;
 }) {
+  const { categories, dishes, offline } = useLiveGuestMenu(
+    restaurant.id,
+    initialCategories,
+    initialDishes,
+  );
   const [locale, setLocaleState] = useState<MenuLocale>("ka");
   const copy = ui[locale];
   const translationPhrases = useMemo(() => {
     const phrases: string[] = [];
-    for (const category of categories) phrases.push(category.name);
+    for (const category of categories) {
+      if (!storedLocaleText(locale, category.name_en, category.name_ru)) {
+        phrases.push(category.name);
+      }
+    }
     for (const dish of dishes) {
-      phrases.push(dish.name);
-      if (dish.description) phrases.push(dish.description);
+      if (!storedLocaleText(locale, dish.name_en, dish.name_ru)) {
+        phrases.push(dish.name);
+      }
+      if (
+        dish.description &&
+        !storedLocaleText(locale, dish.description_en, dish.description_ru)
+      ) {
+        phrases.push(dish.description);
+      }
       for (const ingredient of dish.ingredients ?? []) phrases.push(ingredient);
       for (const allergen of dish.allergens ?? []) phrases.push(allergen);
     }
     return phrases;
-  }, [categories, dishes]);
+  }, [categories, dishes, locale]);
   const { translating, translate } = useMenuTranslations(
     locale,
     translationPhrases,
+    restaurant.id,
   );
   const [activeCategory, setActiveCategory] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
@@ -107,15 +156,22 @@ export function RestaurantMenu({
   const [chatPrompt, setChatPrompt] = useState<string | null>(null);
   const clearChatPrompt = useCallback(() => setChatPrompt(null), []);
   const [cartOpen, setCartOpen] = useState(false);
-  const [cart, setCart] = useState<CartLine[]>([]);
+  const tableCart = useSharedTableCart(restaurant.id, table?.id ?? null);
+  const cart = tableCart.lines;
   const [lastAddedId, setLastAddedId] = useState<string | null>(null);
   const [calling, setCalling] = useState(false);
+  const callingRef = useRef(false);
   const [requestOpen, setRequestOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [noticeError, setNoticeError] = useState(false);
+  const [ticketSeed, setTicketSeed] = useState<GuestTicket | null>(null);
   const [diet, setDiet] = useState<DietFilter>(emptyDietFilter);
   const context = useGuestWeather();
+  const dockRef = useRef<HTMLDivElement>(null);
+  const chromeRef = useRef<HTMLDivElement>(null);
+  const [dockHeight, setDockHeight] = useState(168);
+  const [vvBottom, setVvBottom] = useState(0);
 
   useEffect(() => {
     const stored = window.localStorage.getItem("smart-ai-menu-guest-lang");
@@ -124,7 +180,61 @@ export function RestaurantMenu({
     }
   }, []);
 
+  useEffect(() => {
+    return bindGuestIntentSession(restaurant.id, table?.id);
+  }, [restaurant.id, table?.id]);
+
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const update = () => {
+      const inset = Math.max(
+        0,
+        Math.round(window.innerHeight - vv.height - vv.offsetTop),
+      );
+      setVvBottom(inset);
+      document.documentElement.style.setProperty("--vv-bottom", `${inset}px`);
+    };
+    update();
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    window.addEventListener("resize", update);
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+      document.documentElement.style.removeProperty("--vv-bottom");
+    };
+  }, []);
+
+  useEffect(() => {
+    const dock = dockRef.current;
+    const chrome = chromeRef.current;
+    if (!dock || typeof ResizeObserver === "undefined") return;
+    const update = () => {
+      const next = Math.ceil(dock.getBoundingClientRect().height);
+      const top = chrome ? Math.ceil(chrome.getBoundingClientRect().height) : 0;
+      if (next > 0) {
+        setDockHeight(next);
+        document.documentElement.style.scrollPaddingBottom = `${next + vvBottom + 24}px`;
+      }
+      if (top > 0) {
+        document.documentElement.style.scrollPaddingTop = `${top + 8}px`;
+      }
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(dock);
+    if (chrome) observer.observe(chrome);
+    return () => {
+      observer.disconnect();
+      document.documentElement.style.scrollPaddingBottom = "";
+      document.documentElement.style.scrollPaddingTop = "";
+    };
+  }, [vvBottom]);
+
   function openHost(prompt?: string) {
+    if (offline) return;
     const next = prompt?.trim();
     setChatPrompt(next ? next : null);
     setChatOpen(true);
@@ -140,10 +250,26 @@ export function RestaurantMenu({
   }, [locale]);
 
   useEffect(() => {
+    setLastAddedId(null);
+    setChatOpen(false);
+    setChatPrompt(null);
+    setDiet(emptyDietFilter());
+    setNotice(null);
+    setTicketSeed(null);
+  }, [restaurant.id]);
+
+  useEffect(() => {
     if (!notice || noticeError) return;
     const timer = window.setTimeout(() => setNotice(null), 4000);
     return () => window.clearTimeout(timer);
   }, [notice, noticeError]);
+
+  useEffect(() => {
+    if (!offline) return;
+    setChatOpen(false);
+    setChatPrompt(null);
+    setRequestOpen(false);
+  }, [offline]);
 
   const categoriesWithDishes = useMemo(
     () =>
@@ -170,6 +296,22 @@ export function RestaurantMenu({
     return pool.filter((dish) => dishMatchesQuery(dish, query));
   }, [activeCategory, dishes, searchQuery]);
 
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (query.length < 3) return;
+    const timer = window.setTimeout(() => {
+      if (visibleDishes.length > 0) return;
+      trackOffMenuRequest({
+        restaurantId: restaurant.id,
+        tableId: table?.id,
+        source: "search",
+        query,
+        dishes,
+      });
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [dishes, restaurant.id, searchQuery, table?.id, visibleDishes.length]);
+
   const itemCount = cart.reduce((sum, line) => sum + line.quantity, 0);
   const subtotal = cartSubtotal(cart);
   const totals = cartTotals(
@@ -182,30 +324,66 @@ export function RestaurantMenu({
       pickContextUpsells({
         dishes,
         categories,
-        cart: cart.map((line) => ({ id: line.id, quantity: line.quantity })),
+        cart: cart.map((line) => ({
+          id: line.dishId ?? line.id,
+          quantity: line.quantity,
+        })),
         diet,
         context,
+        lastAddedId,
+        locale,
         limit: 3,
       }),
-    [cart, categories, context, diet, dishes],
+    [cart, categories, context, diet, dishes, lastAddedId, locale],
   );
   const recommendations = upsell.items;
+  const soldOutIds = useMemo(
+    () =>
+      new Set(
+        dishes.filter((dish) => !dish.is_available).map((dish) => dish.id),
+      ),
+    [dishes],
+  );
 
-  function quantityFor(dishId: string) {
-    return cart.find((line) => line.id === dishId)?.quantity ?? 0;
+  function quantityFor(dishId: string, pour?: DrinkPour) {
+    return cart
+      .filter(
+        (line) =>
+          (line.dishId ?? line.id) === dishId &&
+          (pour ? line.pour === pour : true),
+      )
+      .reduce((sum, line) => sum + line.quantity, 0);
   }
 
-  function addToCart(dish: MenuDish) {
-    if (!dish.is_available) return;
+  function draftQuantityFor(dishId: string, pour?: DrinkPour) {
+    return cart
+      .filter(
+        (line) =>
+          (line.dishId ?? line.id) === dishId &&
+          line.status !== "sent" &&
+          (pour ? line.pour === pour : true),
+      )
+      .reduce((sum, line) => sum + line.quantity, 0);
+  }
+
+  function addToCart(dish: MenuDish, pour?: DrinkPour) {
+    if (!dish.is_available || offline) return;
+    const unitPrice = priceForPour(dish, pour);
     trackGuestIntent({
       restaurantId: restaurant.id,
       tableId: table?.id,
       eventType: "cart_add",
       dishId: dish.id,
       dishName: dish.name,
-      unitPrice: Number(dish.price),
+      categoryId: dish.category_id,
+      unitPrice,
     });
-    changeQuantity(dish.id, 1, dish);
+    tableCart.addDish({
+      id: dish.id,
+      name: dish.name,
+      price: unitPrice,
+      pour,
+    });
     setLastAddedId(dish.id);
   }
 
@@ -215,27 +393,72 @@ export function RestaurantMenu({
     addToCart(full);
   }
 
-  function changeQuantity(dishId: string, delta: number, dish?: MenuDish) {
-    const existing = cart.find((line) => line.id === dishId);
-    const nextQuantity = existing ? existing.quantity + delta : delta > 0 ? 1 : 0;
-    if (nextQuantity < 1) {
+  function changeQuantity(
+    dishId: string,
+    delta: number,
+    dish?: MenuDish,
+    pour?: DrinkPour,
+  ) {
+    if (delta > 0 && (soldOutIds.has(dishId) || offline)) return;
+    if (delta < 0 && draftQuantityFor(dishId, pour) < 1) return;
+    if (delta > 0) {
+      const source = dish ?? dishes.find((item) => item.id === dishId);
+      if (!source) return;
+      addToCart(source, pour);
+      return;
+    }
+    tableCart.decreaseDish(dishId, pour);
+    if (quantityFor(dishId) + delta < 1) {
       setLastAddedId((current) => (current === dishId ? null : current));
     }
-    setCart((current) => applyQuantityDelta(current, dishId, delta, dish));
     setNotice(null);
   }
 
-  function removeFromCart(dishId: string) {
-    setCart((current) => current.filter((line) => line.id !== dishId));
-    setLastAddedId((current) => (current === dishId ? null : current));
+  function updateLineNote(lineId: string, note: string) {
+    tableCart.setLineNote(lineId, note);
+  }
+
+  function removeFromCart(lineId: string) {
+    const line = cart.find((item) => item.id === lineId);
+    tableCart.removeLine(lineId);
+    if (line && quantityFor(line.dishId ?? line.id) <= line.quantity) {
+      setLastAddedId((current) =>
+        current === (line.dishId ?? line.id) ? null : current,
+      );
+    }
     setNotice(null);
+  }
+
+  function hasUnsentCart() {
+    return cart.some((line) => line.status !== "sent");
+  }
+
+  function requestWaiterOrMenu() {
+    if (hasUnsentCart()) {
+      setCartOpen(false);
+      void callWaiter("call_waiter");
+      return;
+    }
+    setCartOpen(false);
+    setRequestOpen(true);
   }
 
   async function callWaiter(callType: WaiterCallType) {
-    if (!table || calling) return;
+    if (!table || callingRef.current || calling || offline) return;
+    callingRef.current = true;
     setCalling(true);
     setNotice(null);
     try {
+      const flushed =
+        callType === "call_waiter" ? await tableCart.flush() : [];
+      const flushedDrafts = flushed.filter((line) => line.status !== "sent");
+      const localDrafts = cart.filter((line) => line.status !== "sent");
+      const orderLines =
+        flushedDrafts.length > 0
+          ? flushedDrafts
+          : localDrafts.length > 0
+            ? localDrafts
+            : flushedDrafts;
       const res = await fetch("/api/waiter-calls", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -245,15 +468,17 @@ export function RestaurantMenu({
           table_number: table.table_number,
           call_type: callType,
           items:
-            callType === "call_waiter" ||
-            callType === "bill_card" ||
-            callType === "bill_cash"
+            callType === "call_waiter"
               ? syncServiceFeeLine(
-                  cart.map((line) => ({
-                    dish_id: line.id,
+                  orderLines.map((line) => ({
+                    dish_id: line.dishId ?? line.id,
                     name: line.name,
                     quantity: line.quantity,
                     unit_price: line.price,
+                    ...(line.note?.trim()
+                      ? { note: line.note.trim().slice(0, 200) }
+                      : {}),
+                    ...(line.pour ? { pour: line.pour } : {}),
                   })),
                   totals.percent,
                   copy.serviceFee(totals.percent),
@@ -261,15 +486,37 @@ export function RestaurantMenu({
               : [],
         }),
       });
-      const json = (await res.json()) as { call?: { id: string }; error?: string };
+      const json = (await res.json()) as {
+        call?: {
+          id: string;
+          status?: string;
+          call_type?: WaiterCallType;
+          created_at?: string;
+        };
+        error?: string;
+      };
       if (!res.ok || !json.call) {
         setNoticeError(true);
-        setNotice(json.error ?? copy.callFail);
+        setNotice(
+          json.error === "Cart is empty."
+            ? copy.cartEmpty
+            : (json.error ?? copy.callFail),
+        );
         return;
       }
       setRequestOpen(false);
       setNoticeError(false);
       setNotice(copy.requestSent);
+      void tableCart.refresh();
+      if (callType === "call_waiter" || callType === "clean_table") {
+        setTicketSeed({
+          id: json.call.id,
+          status: json.call.status ?? "open",
+          call_type: json.call.call_type ?? callType,
+          created_at: json.call.created_at ?? new Date().toISOString(),
+          stage: "sent",
+        });
+      }
       if (callType === "bill_card" || callType === "bill_cash") {
         setFeedbackOpen(true);
       }
@@ -277,13 +524,21 @@ export function RestaurantMenu({
       setNoticeError(true);
       setNotice(copy.callFail);
     } finally {
+      callingRef.current = false;
       setCalling(false);
     }
   }
 
   return (
-    <div className="bg-background flex min-h-full flex-col pb-40">
-      <header className="bg-background/95 sticky top-0 z-20 border-b border-secondary/30 px-4 py-4 backdrop-blur">
+    <div
+      className="bg-background flex min-h-full flex-col"
+      style={{ paddingBottom: dockHeight + vvBottom + 24 }}
+    >
+      <div
+        ref={chromeRef}
+        className="bg-background/95 sticky top-0 z-20 border-b border-secondary/30 backdrop-blur"
+      >
+      <header className="px-4 py-4">
         <div className="mx-auto flex max-w-lg items-center gap-3">
           {restaurant.logo ? (
             // eslint-disable-next-line @next/next/no-img-element
@@ -322,8 +577,17 @@ export function RestaurantMenu({
         </div>
       </header>
 
+      {offline ? (
+        <div
+          role="status"
+          className="border-t border-amber-500/40 bg-amber-50 px-4 py-2 text-center text-xs font-medium text-amber-950"
+        >
+          {copy.offlineBanner}
+        </div>
+      ) : null}
+
       {dishes.length > 0 ? (
-      <div className="bg-background/95 sticky top-[4.75rem] z-10 border-b border-secondary/30 px-4 py-3 backdrop-blur">
+      <div className="border-t border-secondary/30 px-4 py-3">
         <div className="mx-auto flex max-w-lg flex-col gap-3">
           <label className="relative block">
             <span className="sr-only">{copy.searchAria}</span>
@@ -347,7 +611,7 @@ export function RestaurantMenu({
               className="h-11 rounded-xl border-primary/15 bg-muted/40 pr-20 pl-10 text-sm md:text-sm [&::-webkit-search-cancel-button]:hidden"
             />
             <span className="absolute top-1/2 right-1.5 flex -translate-y-1/2 items-center gap-0.5">
-              {looksLikeCulinaryQuestion(searchQuery) ? (
+              {looksLikeCulinaryQuestion(searchQuery) && !offline ? (
                 <button
                   type="button"
                   className="flex size-8 items-center justify-center rounded-full text-[#8b5a1a]"
@@ -378,7 +642,12 @@ export function RestaurantMenu({
             {categoriesWithDishes.map((category) => (
               <FilterChip
                 key={category.id}
-                label={translate(category.name)}
+                label={
+                  storedLocaleText(locale, category.name_en, category.name_ru) ||
+                  (categoryNameFromFields(category, locale) !== category.name
+                    ? categoryNameFromFields(category, locale)
+                    : translate(category.name))
+                }
                 active={activeCategory === category.id && !searchQuery.trim()}
                 onClick={() => {
                   setSearchQuery("");
@@ -387,7 +656,7 @@ export function RestaurantMenu({
               />
             ))}
           </div>
-          {looksLikeCulinaryQuestion(searchQuery) ? (
+          {looksLikeCulinaryQuestion(searchQuery) && !offline ? (
             <button
               type="button"
               onClick={() => openHost(searchQuery)}
@@ -399,6 +668,7 @@ export function RestaurantMenu({
         </div>
       </div>
       ) : null}
+      </div>
 
       {translating && locale !== "ka" ? (
         <p className="text-muted-foreground mx-auto w-full max-w-lg px-4 pt-3 text-center text-xs">
@@ -406,12 +676,12 @@ export function RestaurantMenu({
         </p>
       ) : null}
 
-      <main className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 pt-3 pb-28">
+      <main className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 pt-3">
         {visibleDishes.length === 0 ? (
           searchQuery.trim() ? (
             <div className="flex flex-col items-center gap-3 py-12 text-center">
               <p className="text-muted-foreground text-sm">{copy.searchEmpty}</p>
-              {looksLikeCulinaryQuestion(searchQuery) ? (
+              {looksLikeCulinaryQuestion(searchQuery) && !offline ? (
                 <Button
                   type="button"
                   size="sm"
@@ -448,24 +718,48 @@ export function RestaurantMenu({
                 data-locale={locale}
                 data-tx={locale}
                 className="bg-card overflow-hidden rounded-2xl border border-secondary/35 shadow-[0_1px_0_rgba(45,0,0,0.04)]"
+                style={{
+                  scrollMarginTop: 12,
+                  scrollMarginBottom: dockHeight + 24,
+                }}
               >
               <DishCardImage
                 src={dish.image_url}
-                alt={translate(dish.name)}
+                alt={guestDishTitle(dish, locale, translate)}
               />
               <div className="space-y-3 p-4">
                 <div className="flex items-start justify-between gap-3">
                   <h2 className="text-lg font-medium leading-snug text-foreground">
-                    {translate(dish.name)}
+                    {guestDishTitle(dish, locale, translate)}
                   </h2>
-                  <p className="text-primary shrink-0 text-base font-semibold tabular-nums">
-                    {formatGel(dish.price)}
-                  </p>
+                  <div className="text-brand-price shrink-0 text-right text-base font-semibold tabular-nums">
+                    {availablePours(dish).length ? (
+                      <div className="space-y-0.5">
+                        {dish.glass_price != null ? (
+                          <p>
+                            {copy.priceGlass} {formatGel(dish.glass_price)}
+                          </p>
+                        ) : null}
+                        {dish.bottle_price != null ? (
+                          <p>
+                            {copy.priceBottle} {formatGel(dish.bottle_price)}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <p>{formatGel(dish.price)}</p>
+                    )}
+                  </div>
                 </div>
-                {dish.description ? (
+                {dish.prep_minutes ? (
+                  <p className="text-muted-foreground text-xs">
+                    {copy.prepTime}: {dish.prep_minutes} {copy.prepMinutes}
+                  </p>
+                ) : null}
+                {dish.description ||
+                storedLocaleText(locale, dish.description_en, dish.description_ru) ? (
                   <p className="text-muted-foreground text-sm leading-relaxed">
-                    {dishDescription(dish.name, dish.description, locale) ||
-                      translate(dish.description)}
+                    {guestDishDescription(dish, locale, translate)}
                   </p>
                 ) : null}
                 {(dish.ingredients ?? []).length > 0 ? (
@@ -475,7 +769,11 @@ export function RestaurantMenu({
                     </span>
                     <span className="text-muted-foreground">
                       {(dish.ingredients ?? [])
-                        .map((item) => translate(item))
+                        .map((item) => {
+                          const labeled = ingredientLabel(item, locale);
+                          if (locale === "ka" || labeled !== item) return labeled;
+                          return translate(item);
+                        })
                         .join(", ")}
                     </span>
                   </p>
@@ -486,11 +784,53 @@ export function RestaurantMenu({
                   ) : null}
                   {(dish.allergens ?? []).map((allergen) => (
                     <Badge key={allergen} variant="secondary">
-                      {translate(allergen)}
+                      {allergenLabel(allergen, locale)}
                     </Badge>
                   ))}
                 </div>
-                {dish.is_available && quantityFor(dish.id) > 0 ? (
+                <DishNutritionFacts
+                  dish={dish}
+                  heading={copy.nutritionHeading}
+                  labels={copy}
+                />
+                {availablePours(dish).length ? (
+                  <div className="grid gap-2">
+                    {availablePours(dish).map((pour) =>
+                      quantityFor(dish.id, pour) > 0 ? (
+                        <div key={pour} className="space-y-1">
+                          <p className="text-muted-foreground text-xs">
+                            {pour === "glass" ? copy.addGlass : copy.addBottle}
+                          </p>
+                          <QuantityStepper
+                            value={quantityFor(dish.id, pour)}
+                            onDecrease={() =>
+                              changeQuantity(dish.id, -1, dish, pour)
+                            }
+                            onIncrease={() =>
+                              changeQuantity(dish.id, 1, dish, pour)
+                            }
+                            decreaseLabel={copy.decreaseQty}
+                            increaseLabel={copy.increaseQty}
+                            disabledIncrease={!dish.is_available || offline}
+                            disabledDecrease={draftQuantityFor(dish.id, pour) < 1}
+                          />
+                        </div>
+                      ) : (
+                        <Button
+                          key={pour}
+                          type="button"
+                          className="w-full"
+                          disabled={!dish.is_available || offline}
+                          onClick={() => addToCart(dish, pour)}
+                        >
+                          {dish.is_available
+                            ? `${pour === "glass" ? copy.addGlass : copy.addBottle} · ${formatGel(priceForPour(dish, pour))}`
+                            : copy.soldOut}
+                        </Button>
+                      ),
+                    )}
+                  </div>
+                ) : quantityFor(dish.id) > 0 ? (
                   <QuantityStepper
                     value={quantityFor(dish.id)}
                     onDecrease={() => changeQuantity(dish.id, -1)}
@@ -501,18 +841,21 @@ export function RestaurantMenu({
                         eventType: "cart_add",
                         dishId: dish.id,
                         dishName: dish.name,
+                        categoryId: dish.category_id,
                         unitPrice: Number(dish.price),
                       });
                       changeQuantity(dish.id, 1, dish);
                     }}
                     decreaseLabel={copy.decreaseQty}
                     increaseLabel={copy.increaseQty}
+                    disabledIncrease={!dish.is_available || offline}
+                    disabledDecrease={draftQuantityFor(dish.id) < 1}
                   />
                 ) : (
                   <Button
                     type="button"
                     className="w-full"
-                    disabled={!dish.is_available}
+                    disabled={!dish.is_available || offline}
                     onClick={() => addToCart(dish)}
                   >
                     {dish.is_available ? copy.addToCart : copy.soldOut}
@@ -529,6 +872,7 @@ export function RestaurantMenu({
                     locale={locale}
                     copy={copy}
                     onAdd={addRecommendation}
+                    disabled={offline}
                   />
                 </div>
               ) : null}
@@ -541,16 +885,32 @@ export function RestaurantMenu({
         <div
           className={
             noticeError
-              ? "border-destructive/30 bg-background text-destructive fixed inset-x-4 bottom-36 z-30 mx-auto max-w-lg rounded-xl border px-4 py-3 text-sm shadow-lg"
-              : "bg-background fixed inset-x-4 bottom-36 z-30 mx-auto max-w-lg rounded-xl border border-emerald-500/30 px-4 py-3 text-sm text-emerald-800 shadow-lg"
+              ? "border-destructive/30 bg-background text-destructive fixed inset-x-4 z-30 mx-auto max-w-lg rounded-xl border px-4 py-3 text-sm shadow-lg"
+              : "bg-background fixed inset-x-4 z-30 mx-auto max-w-lg rounded-xl border border-emerald-500/30 px-4 py-3 text-sm text-emerald-800 shadow-lg"
           }
+          style={{ bottom: dockHeight + vvBottom + 12 }}
         >
           {notice}
         </div>
       ) : null}
 
-      <div className="fixed inset-x-0 bottom-0 z-20">
-        <div className="mx-auto flex max-w-md flex-col gap-2 rounded-t-3xl border-t bg-[#FAF6F0] p-3 shadow-2xl">
+      <div
+        className="pointer-events-none fixed inset-x-0 z-20"
+        style={{ bottom: vvBottom }}
+      >
+        <div
+          ref={dockRef}
+          className="pointer-events-auto mx-auto flex max-w-md flex-col gap-2 rounded-t-3xl border-t bg-[#FAF6F0] p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-2xl"
+        >
+          {table ? (
+            <GuestTicketStatus
+              restaurantId={restaurant.id}
+              tableId={table.id}
+              locale={locale}
+              copy={copy}
+              seed={ticketSeed}
+            />
+          ) : null}
           <button
             type="button"
             className="flex items-start justify-between gap-3 text-left"
@@ -571,7 +931,7 @@ export function RestaurantMenu({
                   : copy.cartHint}
               </p>
             </span>
-            <p className="text-primary shrink-0 self-center text-base font-semibold tabular-nums">
+            <p className="text-brand-price shrink-0 self-center text-base font-semibold tabular-nums">
               {formatGel(total)}
             </p>
           </button>
@@ -583,8 +943,9 @@ export function RestaurantMenu({
           <div className="grid w-full grid-cols-2 gap-2">
             <button
               type="button"
+              disabled={offline}
               onClick={() => openHost()}
-              className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-[#D4AF37] bg-[#FAF6F0] py-3 text-[#5A121A] shadow-sm"
+              className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-[#D4AF37] bg-[#FAF6F0] py-3 text-[#5A121A] shadow-sm disabled:opacity-60"
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
@@ -598,8 +959,8 @@ export function RestaurantMenu({
             </button>
             <button
               type="button"
-              disabled={!table || calling}
-              onClick={() => setRequestOpen(true)}
+              disabled={!table || calling || offline}
+              onClick={requestWaiterOrMenu}
               className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#5A121A] py-3 text-white shadow-sm disabled:opacity-60"
             >
               <BellIcon className="size-4 shrink-0" />
@@ -623,11 +984,28 @@ export function RestaurantMenu({
         copy={copy}
         locale={locale}
         calling={calling}
-        canCall={Boolean(table)}
-        onIncrease={(id) => changeQuantity(id, 1)}
-        onDecrease={(id) => changeQuantity(id, -1)}
+        canCall={Boolean(table) && !offline}
+        onIncrease={(id) => {
+          const line = cart.find((item) => item.id === id);
+          if (!line) return;
+          if (line.status === "sent") {
+            const dish = dishes.find((item) => item.id === (line.dishId ?? line.id));
+            if (dish) changeQuantity(dish.id, 1, dish);
+            return;
+          }
+          tableCart.setLineQuantity(id, line.quantity + 1);
+        }}
+        onDecrease={(id) => {
+          const line = cart.find((item) => item.id === id);
+          if (!line || line.status === "sent") return;
+          tableCart.setLineQuantity(id, line.quantity - 1);
+        }}
         onRemove={removeFromCart}
-        onCallWaiter={() => setRequestOpen(true)}
+        onNoteChange={updateLineNote}
+        onCallWaiter={requestWaiterOrMenu}
+        soldOutIds={soldOutIds}
+        actionsDisabled={offline}
+        shared={tableCart.shared}
         recommendations={recommendations}
         recommendationHeading={upsell.heading}
         onAddRecommendation={addRecommendation}
@@ -640,6 +1018,13 @@ export function RestaurantMenu({
         copy={copy}
         sending={calling}
         onSelect={(type) => void callWaiter(type)}
+        cart={cart}
+        total={total}
+        totals={totals}
+        recommendations={recommendations}
+        recommendationHeading={upsell.heading}
+        onAddRecommendation={addRecommendation}
+        actionsDisabled={offline}
       />
 
       {table ? (
@@ -655,10 +1040,15 @@ export function RestaurantMenu({
       ) : null}
 
       <AiChatbot
+        key={restaurant.id}
         open={chatOpen}
         onOpenChange={setChatOpen}
         onDietChange={setDiet}
+        restaurantId={restaurant.id}
+        tableId={table?.id}
         restaurantName={restaurant.name}
+        quickPrompts={quickPrompts}
+        serviceFeePercent={totals.percent}
         dishes={dishes.map((dish) => ({
           ...dish,
           category:
@@ -668,6 +1058,19 @@ export function RestaurantMenu({
         locale={locale}
         pendingPrompt={chatPrompt}
         onPendingPromptConsumed={clearChatPrompt}
+        quantityFor={quantityFor}
+        cartIds={cart.map((line) => line.dishId ?? line.id)}
+        companionSuggestions={recommendations}
+        companionMix={upsell.mix}
+        onAddToCart={(dish) => {
+          const full = dishes.find((item) => item.id === dish.id);
+          if (full) addToCart(full);
+        }}
+        onChangeQuantity={(dish, delta) => {
+          const full = dishes.find((item) => item.id === dish.id);
+          if (full) changeQuantity(full.id, delta, full);
+        }}
+        onRemoveFromCart={removeFromCart}
       />
     </div>
   );
@@ -677,6 +1080,34 @@ function normalizeSearch(value: string) {
   return value.trim().toLocaleLowerCase();
 }
 
+function guestDishTitle(
+  dish: MenuDish,
+  locale: MenuLocale,
+  translate: (text: string) => string,
+) {
+  const stored = storedLocaleText(locale, dish.name_en, dish.name_ru);
+  if (stored) return stored;
+  const labeled = dishNameFromFields(dish, locale);
+  if (locale === "ka" || labeled !== dish.name) return labeled;
+  return translate(dish.name);
+}
+
+function guestDishDescription(
+  dish: MenuDish,
+  locale: MenuLocale,
+  translate: (text: string) => string,
+) {
+  const stored = storedLocaleText(
+    locale,
+    dish.description_en,
+    dish.description_ru,
+  );
+  if (stored) return stored;
+  const labeled = dishDescriptionFromFields(dish, locale);
+  if (labeled) return labeled;
+  return dish.description ? translate(dish.description) : "";
+}
+
 function dishMatchesQuery(dish: MenuDish, query: string) {
   const needle = normalizeSearch(query);
   if (!needle) return true;
@@ -684,6 +1115,10 @@ function dishMatchesQuery(dish: MenuDish, query: string) {
   const fields = [
     dish.name,
     dish.description,
+    dish.name_en,
+    dish.name_ru,
+    dish.description_en,
+    dish.description_ru,
     dishLabel(dish.name, "ka"),
     dishLabel(dish.name, "en"),
     dishLabel(dish.name, "ru"),
@@ -738,22 +1173,27 @@ function DishIntentCard({
     if (!node) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (!entry?.isIntersecting) return;
-        trackGuestIntent({
-          restaurantId,
-          tableId,
-          eventType: "view",
+        setDishAttention({
           dishId: dish.id,
           dishName: dish.name,
+          categoryId: dish.category_id,
           unitPrice: Number(dish.price),
+          visible: Boolean(entry?.isIntersecting),
         });
-        observer.disconnect();
       },
       { threshold: 0.55 },
     );
     observer.observe(node);
-    return () => observer.disconnect();
-  }, [dish.id, dish.name, dish.price, restaurantId, tableId]);
+    return () => {
+      setDishAttention({
+        dishId: dish.id,
+        dishName: dish.name,
+        categoryId: dish.category_id,
+        visible: false,
+      });
+      observer.disconnect();
+    };
+  }, [dish.category_id, dish.id, dish.name, dish.price, restaurantId, tableId]);
 
   return <div ref={ref}>{children}</div>;
 }

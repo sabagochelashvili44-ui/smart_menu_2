@@ -119,9 +119,11 @@ export async function POST(request: Request) {
     }
 
     const resend = new Resend(apiKey);
+    const fromEmail =
+      process.env.RESEND_FROM_EMAIL?.trim() || "onboarding@resend.dev";
     const registerUrl = `${getPublicAppUrl()}/register?email=${encodeURIComponent(email)}`;
     const { error: emailError } = await resend.emails.send({
-      from: "onboarding@resend.dev",
+      from: fromEmail,
       to: email,
       subject: "მოწვევა: Smart Menu-ს სამართავი პანელი",
       html: inviteHtml(roleLabelKa(role), restaurantName, registerUrl),

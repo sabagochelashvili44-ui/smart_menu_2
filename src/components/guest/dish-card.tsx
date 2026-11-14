@@ -1,5 +1,10 @@
 "use client";
 
+import {
+  guestNutritionItems,
+  type DishNutrition,
+  type GuestNutritionLabels,
+} from "@/lib/dish-nutrition";
 import Image from "next/image";
 import { useEffect, useState } from "react";
 
@@ -14,7 +19,7 @@ function ImagePlaceholder({ className }: { className?: string }) {
     <div
       className={
         className ??
-        "from-muted via-muted/80 to-muted/50 h-44 w-full bg-gradient-to-br sm:h-52"
+        "from-muted via-muted/80 to-muted/50 h-44 w-full bg-linear-to-br sm:h-52"
       }
       aria-hidden
     />
@@ -39,7 +44,7 @@ export function DishCardImage({ src, alt, className }: DishCardImageProps) {
     <div className="bg-muted relative h-44 w-full overflow-hidden sm:h-52">
       {!loaded ? (
         <div
-          className="from-muted via-background/40 to-muted absolute inset-0 animate-pulse bg-gradient-to-br"
+          className="from-muted via-background/40 to-muted absolute inset-0 animate-pulse bg-linear-to-br"
           aria-hidden
         />
       ) : null}
@@ -50,7 +55,7 @@ export function DishCardImage({ src, alt, className }: DishCardImageProps) {
         fill
         unoptimized
         sizes="(max-width: 32rem) 100vw, 512px"
-        className={`object-cover transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"}`}
+        className={`object-contain transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"}`}
         onLoad={() => setLoaded(true)}
         onError={() => {
           setLoaded(false);
@@ -58,5 +63,27 @@ export function DishCardImage({ src, alt, className }: DishCardImageProps) {
         }}
       />
     </div>
+  );
+}
+
+export function DishNutritionFacts({
+  dish,
+  heading,
+  labels,
+}: {
+  dish: DishNutrition;
+  heading: string;
+  labels: GuestNutritionLabels;
+}) {
+  const items = guestNutritionItems(dish, labels);
+  if (!items.length) return null;
+
+  return (
+    <section className="space-y-1">
+      <p className="text-foreground text-sm font-medium">{heading}</p>
+      <p className="text-muted-foreground text-xs leading-relaxed">
+        {items.map((item) => item.text).join(" | ")}
+      </p>
+    </section>
   );
 }

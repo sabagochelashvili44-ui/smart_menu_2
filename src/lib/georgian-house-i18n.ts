@@ -602,4 +602,172 @@ export const DISH_I18N: Record<string, DishI18n> = {
     en: { name: "Espresso tonic", description: "Espresso tonic." },
     ru: { name: "Эспрессо-тоник", description: "Эспрессо-тоник." },
   },
+  "საფირმო ხაჭაპური სამეფო": {
+    en: {
+      name: "Royal Signature Khachapuri",
+      description:
+        "Double-cheese baked khachapuri filled with a blend of Imeretian cheese and sulguni, topped before baking with an extra layer of sulguni and clarified butter for a golden, stretchy crust.",
+    },
+    ru: {
+      name: "Фирменный хачапури «Царский»",
+      description:
+        "Хачапури с двойным сыром: традиционное тесто с начинкой из имеретинского сыра и сулугуни, сверху покрытое дополнительным слоем сулугуни и топлёным маслом до золотистой тягучей корочки.",
+    },
+  },
+  "საფირმო დესერტი „შოკოლადის ფონდანი“": {
+    en: {
+      name: "Signature Chocolate Fondant",
+      description:
+        "French chocolate lava cake with a crisp shell and a warm, molten chocolate center, served warm with a scoop of vanilla ice cream.",
+    },
+    ru: {
+      name: "Фирменный десерт «Шоколадный фондан»",
+      description:
+        "Французский шоколадный кекс с хрустящей корочкой и горячей жидкой шоколадной сердцевиной; подаётся тёплым с шариком ванильного мороженого.",
+    },
+  },
+  "ხბოს ჩაშუშული": {
+    en: {
+      name: "Veal Chashushuli",
+      description:
+        "Tender veal slow-braised over low heat with tomatoes, onions, and garlic, finished with fresh cilantro, parsley, and dry white wine for a fragrant, lightly tangy sauce.",
+    },
+    ru: {
+      name: "Чашушули из телятины",
+      description:
+        "Нежная телятина, медленно тушённая на слабом огне с томатами, луком и чесноком, со свежей кинзой, петрушкой и сухим белым вином.",
+    },
+  },
+  "კოქტეილი „ქართული ჯინ-ტოპიკი“": {
+    en: {
+      name: "Georgian Gin & Tonic Cocktail",
+      description:
+        "Refreshing highball cocktail of gin and tonic over plenty of ice, brightened with freshly squeezed lime juice and a sprig of rosemary.",
+    },
+    ru: {
+      name: "Коктейль «Грузинский джин-тоник»",
+      description:
+        "Освежающий коктейль из джина и тоника в высоком бокале со льдом, свежевыжатым соком лайма и веточкой розмарина.",
+    },
+  },
+  "ქათმის შქმერული": {
+    en: {
+      name: "Chicken Shkmeruli",
+      description:
+        "Pan-roasted chicken transferred to a sizzling clay ketsi skillet and bathed in a bubbling rich cream sauce seasoned with garlic and black pepper.",
+    },
+    ru: {
+      name: "Куриный шкмерули",
+      description:
+        "Обжаренная до золотистой корочки курица на горячей глиняной кеци в густом сливочно-чесночном соусе с чёрным перцем.",
+    },
+  },
+  "სახლის ლიმონათი „ტარხუნა და ციტრუსი“": {
+    en: {
+      name: "House Lemonade \"Tarragon & Citrus\"",
+      description:
+        "Non-alcoholic craft lemonade made with muddled fresh tarragon leaves, sugar syrup, freshly squeezed lemon and lime juice, ice, and sparkling mineral water.",
+    },
+    ru: {
+      name: "Домашний лимонад «Тархун и цитрус»",
+      description:
+        "Безалкогольный освежающий напиток из свежих листьев тархуна, сахарного сиропа, свежевыжатого сока лимона и лайма, льда и газированной воды.",
+    },
+  },
+  "საქონლის მწვადი ქინძმარში": {
+    en: {
+      name: "Beef Tenderloin Mtsvadi in Kindzmari",
+      description:
+        "Charcoal-grilled beef tenderloin skewers rested hot in a chilled kindzmari marinade of white wine vinegar, crushed garlic, fresh cilantro, and cold water for juicy, piquant flavor.",
+    },
+    ru: {
+      name: "Говяжий мцвади в киндзмари",
+      description:
+        "Обжаренная на углях говяжья вырезка в прохладном маринаде киндзмари из белого винного уксуса, чеснока и свежей кинзы.",
+    },
+  },
+  "საფერავი (ქვევრი)": {
+    en: {
+      name: "Saperavi (Qvevri)",
+      description:
+        "Traditional Georgian dry red wine fermented and aged on the skins in qvevri using Kakhetian methods; deep ruby color with structured tannins and notes of blackberry, black cherry, and smoke.",
+    },
+    ru: {
+      name: "Саперави (квеври)",
+      description:
+        "Традиционное грузинское сухое красное вино, выдержанное в квеври по кахетинской технологии; глубокий гранатовый цвет с нотами ежевики, чёрной вишни и дымка.",
+    },
+  },
+  "ხინკალი ქალაქური (10 ცალი)": {
+    en: {
+      name: "Kalakuri Khinkali (10 pcs)",
+      description:
+        "Ten traditional dumplings wrapped in thin, elastic dough and filled with minced beef and pork seasoned with onion, black pepper, salt, and fresh cilantro in rich natural broth.",
+    },
+    ru: {
+      name: "Хинкали «Калакури» (10 шт.)",
+      description:
+        "Десять сочных хинкали в тонком эластичном тесте с начинкой из рубленой говядины и свинины с луком, чёрным перцем, кинзой и ароматным бульоном внутри.",
+    },
+  },
+  "რქაწითელი (ქვევრი / ქარვისფერი)": {
+    en: {
+      name: "Rkatsiteli (Qvevri / Amber)",
+      description:
+        "Traditional dry amber wine aged on the skins in qvevri for 6 months; full-bodied with pleasant tannins and aromas of dried peach, apricot, and toasted hazelnut.",
+    },
+    ru: {
+      name: "Ркацители (квеври / янтарное)",
+      description:
+        "Традиционное сухое янтарное вино, выдержанное в квеври на мезге 6 месяцев; богатое тело, приятные танины и ноты кураги, сушёного персика и фундука.",
+    },
+  },
+  "გოგრის კრემ-სუპი": {
+    en: {
+      name: "Pumpkin Cream Soup",
+      description:
+        "Velvety cream soup of oven-roasted pumpkin, carrot, onion, and celery root finished with cream, butter, ginger, and toasted pumpkin seeds.",
+    },
+    ru: {
+      name: "Тыквенный крем-суп",
+      description:
+        "Нежный крем-суп из запечённой тыквы, моркови, лука и корня сельдерея со сливками, маслом, имбирём и обжаренными тыквенными семечками.",
+    },
+  },
+  "ქინძმარაული": {
+    en: {
+      name: "Kindzmarauli",
+      description:
+        "Appellation-controlled naturally semi-sweet red wine crafted from Saperavi grapes in Kvareli, Kakheti; velvety palate with ripe blackberry and cherry notes.",
+    },
+    ru: {
+      name: "Киндзмараули",
+      description:
+        "Природно-полусладкое красное вино контролируемого наименования из винограда Саперави (микрозона Кварели, Кахетия) с бархатистым вкусом ежевики и вишни.",
+    },
+  },
+  "მეგრული ხარჩო ნიგვზით": {
+    en: {
+      name: "Megrelian Beef Kharcho with Walnuts",
+      description:
+        "Tender cuts of beef braised in a thick, aromatic walnut sauce with onion, garlic, coriander, blue fenugreek, marigold saffron, and red pepper.",
+    },
+    ru: {
+      name: "Мегрельское харчо с грецким орехом",
+      description:
+        "Нежная говядина, тушённая в густом ореховом соусе с луком, чесноком, кориандром, уцхо-сунели, имеретинским шафраном и красным перцем.",
+    },
+  },
+  "ზღვის პროდუქტების სალათი": {
+    en: {
+      name: "Seafood Salad",
+      description:
+        "Shrimp, mussels, and calamari rings quickly sautéed in olive oil with garlic, served over fresh arugula and cherry tomatoes with lemon dressing.",
+    },
+    ru: {
+      name: "Салат с морепродуктами",
+      description:
+        "Обжаренные в оливковом масле с чесноком креветки, мидии и кольца кальмара на подушке из свежей рукколы и томатов черри с лимонной заправкой.",
+    },
+  },
 };

@@ -193,8 +193,10 @@ export async function POST(request: Request) {
     }
 
     const resend = new Resend(apiKey);
+    const fromEmail =
+      process.env.RESEND_FROM_EMAIL?.trim() || "onboarding@resend.dev";
     const { error: emailError } = await resend.emails.send({
-      from: "onboarding@resend.dev",
+      from: fromEmail,
       to: email,
       subject: "Smart Menu: დროებითი პაროლი",
       html: passwordResetHtml(email, password, `${getPublicAppUrl()}/admin`),

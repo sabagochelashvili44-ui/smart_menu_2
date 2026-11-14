@@ -19,6 +19,7 @@ export function CrossSellSection({
   compact = false,
   heading = "together",
   layout = "cards",
+  disabled = false,
 }: {
   items: CrossSellDish[];
   locale: MenuLocale;
@@ -27,6 +28,7 @@ export function CrossSellSection({
   compact?: boolean;
   heading?: "together" | "chef";
   layout?: "cards" | "bar";
+  disabled?: boolean;
 }) {
   if (items.length === 0) return null;
   const title = heading === "chef" ? copy.chefTip : copy.boughtTogether;
@@ -54,11 +56,11 @@ export function CrossSellSection({
                       fill
                       unoptimized
                       sizes="48px"
-                      className="object-cover"
+                      className="object-contain"
                     />
                   ) : (
                     <div
-                      className="from-muted via-muted/70 to-muted/40 absolute inset-0 bg-gradient-to-br"
+                      className="from-muted via-muted/70 to-muted/40 absolute inset-0 bg-linear-to-br"
                       aria-hidden
                     />
                   )}
@@ -67,7 +69,12 @@ export function CrossSellSection({
                   <p className="line-clamp-1 text-sm font-medium leading-tight">
                     {name}
                   </p>
-                  <p className="text-primary text-xs font-semibold tabular-nums">
+                  {dish.pairReason ? (
+                    <p className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">
+                      {dish.pairReason}
+                    </p>
+                  ) : null}
+                  <p className="text-brand-price text-xs font-semibold tabular-nums">
                     {formatGel(dish.price)}
                   </p>
                 </div>
@@ -77,6 +84,7 @@ export function CrossSellSection({
                   variant="outline"
                   className="shrink-0 px-2 text-xs"
                   aria-label={`${copy.addUpsell}: ${name}`}
+                  disabled={disabled}
                   onClick={() => onAdd(dish)}
                 >
                   {copy.addUpsell}
@@ -111,7 +119,7 @@ export function CrossSellSection({
                     fill
                     unoptimized
                     sizes="120px"
-                    className="object-cover"
+                    className="object-contain"
                   />
                 ) : (
                   <div
@@ -124,8 +132,13 @@ export function CrossSellSection({
                 <p className="line-clamp-2 min-h-8 text-[11px] font-medium leading-tight">
                   {name}
                 </p>
+                {dish.pairReason ? (
+                  <p className="text-muted-foreground line-clamp-2 text-[10px] leading-snug">
+                    {dish.pairReason}
+                  </p>
+                ) : null}
                 <div className="flex items-center justify-between gap-1">
-                  <p className="text-primary text-xs font-semibold tabular-nums">
+                  <p className="text-brand-price text-xs font-semibold tabular-nums">
                     {formatGel(dish.price)}
                   </p>
                   <Button
@@ -133,6 +146,7 @@ export function CrossSellSection({
                     size="icon-xs"
                     className="size-7 shrink-0"
                     aria-label={`${copy.addUpsell}: ${name}`}
+                    disabled={disabled}
                     onClick={() => onAdd(dish)}
                   >
                     <PlusIcon className="size-3.5" />

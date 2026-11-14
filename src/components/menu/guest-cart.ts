@@ -4,7 +4,7 @@ export function applyQuantityDelta(
   current: CartLine[],
   dishId: string,
   delta: number,
-  dish?: { id: string; name: string; price: number },
+  dish?: { id: string; name: string; price: number; pour?: CartLine["pour"] },
 ): CartLine[] {
   const row = current.find((line) => line.id === dishId);
   if (!row) {
@@ -16,6 +16,8 @@ export function applyQuantityDelta(
         name: dish.name,
         price: Number(dish.price),
         quantity: 1,
+        note: "",
+        pour: dish.pour,
       },
     ];
   }
@@ -32,4 +34,10 @@ export function applyQuantityDelta(
 
 export function cartSubtotal(cart: CartLine[]) {
   return cart.reduce((sum, line) => sum + line.quantity * line.price, 0);
+}
+
+export function setCartLineNote(current: CartLine[], dishId: string, note: string) {
+  return current.map((line) =>
+    line.id === dishId ? { ...line, note: note.slice(0, 200) } : line,
+  );
 }

@@ -1,4 +1,4 @@
-import { getMenu, upsertTable } from "@/lib/data/store";
+import { addAdminTable, deleteAdminTable, loadAdminTables } from "@/app/admin/actions";
 import { requireTenantApi } from "@/lib/tenant";
 import type { Table } from "@/types/database";
 import { NextResponse } from "next/server";
@@ -9,25 +9,43 @@ export async function GET() {
   const tenant = await requireTenantApi();
   if (!tenant.ok) return tenant.response;
 
-  const menu = await getMenu(tenant.restaurant.id);
-  if (!menu) {
+  const data = await loadAdminTables();
+  if (!data.restaurant) {
     return NextResponse.json({ error: "Restaurant not found" }, { status: 404 });
   }
-  return NextResponse.json({ restaurant: menu.restaurant, tables: menu.tables });
+  return NextResponse.json(data);
 }
 
 export async function POST(request: Request) {
   const tenant = await requireTenantApi(["owner", "manager"]);
   if (!tenant.ok) return tenant.response;
 
-  const body = (await request.json()) as Partial<Table>;
-  if (!body.table_number) {
+  const body = (await request.json().catch(() => null)) as Partial<Table> | null;
+  if (!body?.table_number?.trim()) {
     return NextResponse.json({ error: "Invalid table" }, { status: 400 });
   }
-  const table: Table = {
-    id: body.id || `table-${crypto.randomUUID().slice(0, 8)}`,
-    restaurant_id: tenant.restaurant.id,
-    table_number: body.table_number,
-  };
-  return NextResponse.json({ table: await upsertTable(table) });
+  const result = await addAdminTable(body.table_number);
+  if (result.error || !result.table) {
+    return NextResponse.json(
+      { error: result.error ?? "Could not add table" },
+      { status: 400 },
+    );
+  }
+  return NextResponse.json({ table: result.table });
+}
+
+export async function DELETE(request: Request) {
+  const tenant = await requireTenantApi(["owner", "manager"]);
+  if (!tenant.ok) return tenant.response;
+
+  const body = (await request.json().catch(() => null)) as { id?: string } | null;
+  const id = String(body?.id ?? "").trim();
+  if (!id) {
+    return NextResponse.json({ error: "Invalid table" }, { status: 400 });
+  }
+  const result = await deleteAdminTable(id);
+  if (result.error) {
+    return NextResponse.json({ error: result.error }, { status: 400 });
+  }
+  return NextResponse.json({ ok: true });
 }

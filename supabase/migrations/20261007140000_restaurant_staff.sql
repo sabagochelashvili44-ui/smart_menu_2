@@ -21,6 +21,10 @@ create index if not exists restaurant_staff_email_idx
 alter table public.restaurant_staff enable row level security;
 alter table public.restaurant_staff force row level security;
 
+grant select, insert, update, delete on table public.restaurant_staff
+  to anon, authenticated, service_role;
+grant all on table public.restaurant_staff to service_role;
+
 create or replace function public.jwt_email()
 returns text
 language sql

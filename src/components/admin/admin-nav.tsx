@@ -42,7 +42,7 @@ const links = [
     href: "/admin/settings",
     key: "settings" as const,
     superOnly: false,
-    roles: ["owner"] as StaffRole[],
+    roles: ["owner", "manager"] as StaffRole[],
   },
   {
     href: "/admin/staff",
@@ -82,7 +82,7 @@ export function AdminNav({
   );
 
   return (
-    <nav className="flex flex-wrap gap-2 border-b border-secondary/30 pb-4">
+    <nav className="flex flex-wrap gap-2 border-b border-secondary/30 pb-4 print:hidden">
       {items.map((link) => {
         const active =
           link.href === "/admin"
