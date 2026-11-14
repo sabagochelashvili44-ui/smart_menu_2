@@ -32,7 +32,7 @@ export default function Home() {
           </CardHeader>
           <CardContent>
             <Link
-              href="/admin"
+              href="/login"
               className={cn(buttonVariants({ variant: "outline" }))}
             >
               Open admin panel

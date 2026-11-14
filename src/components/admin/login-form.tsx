@@ -8,136 +8,108 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { bindManagerTenant } from "@/app/admin/tenant-session";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import { createSupabaseClient } from "@/lib/supabaseClient";
 import { PasswordField } from "@/components/admin/password-field";
 import { adminLandingPath, hardRedirectToAdmin } from "@/lib/login-redirect";
+import { cn } from "cn";
 import Link from "next/link";
-import { usePathname, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 type Mode = "signin" | "signup";
 
-export function LoginScreen() {
+function firstQuery(value: string | string[] | undefined) {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return raw?.trim() ?? "";
+}
+
+function loginPropsFromSearchParams(query: {
+  restaurant?: string | string[];
+  slug?: string | string[];
+  email?: string | string[];
+  next?: string | string[];
+}) {
+  return {
+    restaurantSlug: firstQuery(query.restaurant) || firstQuery(query.slug),
+    invitedEmail: firstQuery(query.email),
+    nextPath: firstQuery(query.next) || null,
+  };
+}
+
+export function LoginScreen({
+  initialMode = "signin",
+  query,
+}: {
+  initialMode?: Mode;
+  query?: {
+    restaurant?: string | string[];
+    slug?: string | string[];
+    email?: string | string[];
+    next?: string | string[];
+  };
+}) {
+  const { restaurantSlug, invitedEmail, nextPath } =
+    loginPropsFromSearchParams(query ?? {});
   return (
     <AdminLocaleProvider>
-      <Suspense>
-        <LoginScreenInner />
-      </Suspense>
+      <LoginScreenInner
+        initialMode={initialMode}
+        restaurantSlug={restaurantSlug}
+        invitedEmail={invitedEmail}
+        nextPath={nextPath}
+      />
     </AdminLocaleProvider>
   );
 }
 
-function LoginScreenInner() {
+function LoginScreenInner({
+  initialMode,
+  restaurantSlug,
+  invitedEmail,
+  nextPath,
+}: {
+  initialMode: Mode;
+  restaurantSlug: string;
+  invitedEmail: string;
+  nextPath: string | null;
+}) {
   const { t } = useAdminLocale();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const tenantKey =
-    searchParams.get("restaurant")?.trim() ||
-    searchParams.get("slug")?.trim() ||
-    "";
-  const invitedEmail = searchParams.get("email")?.trim() ?? "";
-  const nextPath = searchParams.get("next");
   const [restaurantName, setRestaurantName] = useState<string | null>(null);
-  const [managerEmail, setManagerEmail] = useState("");
-  const [alreadySignedIn, setAlreadySignedIn] = useState(false);
 
   useEffect(() => {
-    if (!tenantKey) return;
-    void createSupabaseClient()
-      .from("restaurants")
-      .select("name, manager_email")
-      .eq("slug", tenantKey)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data?.name) setRestaurantName(String(data.name));
-        if (data?.manager_email) setManagerEmail(String(data.manager_email));
-      });
-  }, [tenantKey]);
-
-  useEffect(() => {
+    if (!restaurantSlug) return;
     void createSupabaseBrowserClient()
-      .auth.getUser()
-      .then((result: { data: { user: { email?: string | null } | null } }) => {
-        const user = result.data.user;
-        if (!user) return;
-        if (tenantKey) {
-          setAlreadySignedIn(true);
-          return;
-        }
-        hardRedirectToAdmin(adminLandingPath(user.email, nextPath));
+      .from("restaurants")
+      .select("name")
+      .eq("slug", restaurantSlug)
+      .maybeSingle()
+      .then((result: { data: { name?: string | null } | null }) => {
+        if (result.data?.name) setRestaurantName(String(result.data.name));
       });
-  }, [nextPath, tenantKey]);
+  }, [restaurantSlug]);
 
-  const heading = tenantKey
-    ? `${t.loginForTenant}: ${restaurantName ?? tenantKey}`
+  const heading = restaurantSlug
+    ? `${t.loginForTenant}: ${restaurantName ?? restaurantSlug}`
     : t.loginTitle;
 
   return (
     <main className="mx-auto flex min-h-full max-w-sm flex-col justify-center gap-6 p-6">
-      {alreadySignedIn ? (
-        <div
-          role="status"
-          className="rounded-lg border border-secondary/40 bg-muted px-3 py-2 text-sm"
-        >
-          <p>{t.alreadySignedInShare}</p>
-          <ContinueAsAdminButton
-            restaurantSlug={tenantKey}
-            nextPath={nextPath}
-            label={t.continueAsAdmin}
-          />
-        </div>
-      ) : null}
       <div className="flex justify-end">
         <AdminLanguageSwitcher />
       </div>
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">{heading}</h1>
-        {tenantKey ? null : (
+        {restaurantSlug ? null : (
           <p className="text-muted-foreground mt-1 text-sm">{t.loginHint}</p>
         )}
       </div>
       <LoginForm
-        initialEmail={invitedEmail || managerEmail}
-        initialMode={
-          pathname === "/register" || invitedEmail ? "signup" : "signin"
-        }
-        restaurantSlug={tenantKey}
+        initialEmail={invitedEmail}
+        initialMode={invitedEmail ? "signup" : initialMode}
+        restaurantSlug={restaurantSlug}
         nextPath={nextPath}
       />
     </main>
-  );
-}
-
-function ContinueAsAdminButton({
-  restaurantSlug,
-  nextPath,
-  label,
-}: {
-  restaurantSlug: string;
-  nextPath: string | null;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      className="text-primary mt-1 inline-block text-sm font-medium underline"
-      onClick={() => {
-        void (async () => {
-          const result = await createSupabaseBrowserClient().auth.getUser();
-          const userEmail =
-            (result as { data?: { user?: { email?: string | null } | null } })
-              .data?.user?.email ?? null;
-          const fallback = adminLandingPath(userEmail, nextPath);
-          void bindManagerTenant(restaurantSlug || null);
-          hardRedirectToAdmin(fallback);
-        })();
-      }}
-    >
-      {label}
-    </button>
   );
 }
 
@@ -160,6 +132,7 @@ export function LoginForm({
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [hasActiveSession, setHasActiveSession] = useState(false);
 
   useEffect(() => {
     if (initialEmail) setEmail(initialEmail);
@@ -168,6 +141,23 @@ export function LoginForm({
   useEffect(() => {
     setMode(initialMode);
   }, [initialMode]);
+
+  useEffect(() => {
+    let active = true;
+    const supabase = createSupabaseBrowserClient();
+    void supabase.auth
+      .getUser()
+      .then((res: { data?: { user?: unknown } }) => {
+        if (!active || !res.data?.user) return;
+        setHasActiveSession(true);
+        if (restaurantSlug) {
+          void bindManagerTenant(restaurantSlug);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [restaurantSlug]);
 
   async function goToAdmin() {
     const fallback = adminLandingPath(email, nextPath);
@@ -242,11 +232,29 @@ export function LoginForm({
         const alreadyExists = /already|registered|exists/i.test(
           signUpError.message,
         );
+        if (alreadyExists) {
+          const signedInExisting = await signIn(supabase);
+          if (signedInExisting) {
+            setError(null);
+            setSuccess(t.signedIn);
+            await goToAdmin();
+            return;
+          }
+          setMode("signin");
+        }
         setError(alreadyExists ? t.alreadyExists : signUpError.message);
         return;
       }
 
       if (data.user?.identities && data.user.identities.length === 0) {
+        const signedInExisting = await signIn(supabase);
+        if (signedInExisting) {
+          setError(null);
+          setSuccess(t.signedIn);
+          await goToAdmin();
+          return;
+        }
+        setMode("signin");
         setError(t.alreadyExists);
         return;
       }
@@ -272,20 +280,43 @@ export function LoginForm({
 
   return (
     <div className="space-y-4">
-      <Tabs
-        value={mode}
-        onValueChange={(value) => {
-          setMode(value as Mode);
-          setError(null);
-          setSuccess(null);
-          setConfirmPassword("");
-        }}
-      >
-        <TabsList className="grid w-full grid-cols-2">
-          <TabsTrigger value="signin">{t.signIn}</TabsTrigger>
-          <TabsTrigger value="signup">{t.createAccount}</TabsTrigger>
-        </TabsList>
-      </Tabs>
+      {hasActiveSession ? (
+        <div className="border-secondary/40 bg-muted/40 flex flex-col gap-2 rounded-xl border p-3 text-sm">
+          <p className="text-muted-foreground">{t.alreadySignedInShare}</p>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={pending}
+            onClick={() => void goToAdmin()}
+          >
+            {t.continueAsAdmin}
+          </Button>
+        </div>
+      ) : null}
+      <div className="bg-muted grid h-8 w-full grid-cols-2 rounded-lg p-[3px]">
+        <ModeToggle
+          active={mode === "signin"}
+          onClick={() => {
+            setMode("signin");
+            setError(null);
+            setSuccess(null);
+            setConfirmPassword("");
+          }}
+        >
+          {t.signIn}
+        </ModeToggle>
+        <ModeToggle
+          active={mode === "signup"}
+          onClick={() => {
+            setMode("signup");
+            setError(null);
+            setSuccess(null);
+            setConfirmPassword("");
+          }}
+        >
+          {t.createAccount}
+        </ModeToggle>
+      </div>
 
       <form className="space-y-4" onSubmit={(event) => void onSubmit(event)}>
         <div className="space-y-1">
@@ -344,5 +375,31 @@ export function LoginForm({
         </Button>
       </form>
     </div>
+  );
+}
+
+function ModeToggle({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      className={cn(
+        "inline-flex items-center justify-center rounded-md px-1.5 text-sm font-medium transition-all",
+        active
+          ? "bg-background text-foreground shadow-sm"
+          : "text-foreground/60 hover:text-foreground",
+      )}
+      onClick={onClick}
+    >
+      {children}
+    </button>
   );
 }

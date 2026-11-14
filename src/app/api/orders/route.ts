@@ -1,4 +1,5 @@
 import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
+import { requireTenantApi } from "@/lib/tenant";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -27,13 +28,12 @@ function toItemsJson(raw: unknown): OrderItemJson[] {
 }
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const restaurantId = searchParams.get("restaurantId");
-  const tableId = searchParams.get("tableId") ?? undefined;
+  const tenant = await requireTenantApi();
+  if (!tenant.ok) return tenant.response;
 
-  if (!restaurantId) {
-    return NextResponse.json({ error: "restaurantId required" }, { status: 400 });
-  }
+  const { searchParams } = new URL(request.url);
+  const tableId = searchParams.get("tableId") ?? undefined;
+  const restaurantId = tenant.restaurant.id;
 
   const supabase = createSupabaseAdminClient();
   let query = supabase

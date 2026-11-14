@@ -1,23 +1,15 @@
-import type { Metadata } from "next";
-import { Geist_Mono, Noto_Sans, Noto_Sans_Georgian } from "next/font/google";
+import type { Metadata, Viewport } from "next";
+import "@fontsource-variable/geist-mono/wght.css";
+import "@fontsource-variable/noto-sans/wght.css";
+import "@fontsource-variable/noto-sans-georgian/wght.css";
 import "./globals.css";
 
-const notoSansGeorgian = Noto_Sans_Georgian({
-  variable: "--font-noto-sans-georgian",
-  subsets: ["georgian"],
-  weight: ["400", "500", "600", "700"],
-});
-
-const notoSans = Noto_Sans({
-  variable: "--font-noto-sans",
-  subsets: ["latin", "latin-ext", "cyrillic"],
-  weight: ["400", "500", "600", "700"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  interactiveWidget: "resizes-content",
+};
 
 export const metadata: Metadata = {
   title: "სმარტ მენიუ · Smart AI Menu",
@@ -27,10 +19,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html
-      lang="ka"
-      className={`${notoSansGeorgian.variable} ${notoSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
+    <html lang="ka" className="h-full antialiased">
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );

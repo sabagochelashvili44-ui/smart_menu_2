@@ -52,6 +52,26 @@ export function precedingEqualRange(from: Date, to: Date) {
   return { from: prevFrom, to: prevTo };
 }
 
+export function tbilisiPreviousCalendarMonth(monthStart: Date) {
+  const prevEnd = new Date(monthStart.getTime() - 1);
+  const prevYmd = calendarDateInTbilisi(prevEnd);
+  return {
+    from: tbilisiStartOfYmd(`${prevYmd.slice(0, 7)}-01`),
+    to: tbilisiEndOfYmd(prevYmd),
+  };
+}
+
+export function comparisonRange(window: {
+  preset: AnalyticsRangePreset;
+  from: Date;
+  to: Date;
+}) {
+  if (window.preset === "month") {
+    return tbilisiPreviousCalendarMonth(window.from);
+  }
+  return precedingEqualRange(window.from, window.to);
+}
+
 export function percentChange(current: number, previous: number) {
   if (previous === 0) return current === 0 ? 0 : 100;
   return Number((((current - previous) / previous) * 100).toFixed(1));

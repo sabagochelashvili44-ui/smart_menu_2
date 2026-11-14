@@ -7,6 +7,7 @@ export type CrossSellDish = {
   price: number;
   image_url: string | null;
   is_available: boolean;
+  pairReason?: string;
 };
 
 type CategoryRef = { id: string; name: string };
@@ -53,15 +54,58 @@ export function companionKind(categoryName: string): CrossSellKind | null {
       "side",
       "bread",
       "garnish",
+      "sauce",
+      "tkemali",
+      "adjika",
+      "ketchup",
       "გარნირ",
       "პური",
+      "სოუს",
+      "ტყემალ",
+      "აჯიკა",
       "гарнир",
       "хлеб",
+      "соус",
+      "ткемали",
+      "аджика",
     ])
   ) {
     return "side";
   }
   return null;
+}
+
+const BURGER_HINTS = [
+  "burger",
+  "hamburger",
+  "cheeseburger",
+  "ბურგერ",
+  "гамбургер",
+  "бургер",
+];
+
+const SAUCE_HINTS = [
+  "sauce",
+  "სოუს",
+  "соус",
+  "tkemali",
+  "ტყემალ",
+  "ткемали",
+  "adjika",
+  "აჯიკა",
+  "аджика",
+  "ketchup",
+  "mayo",
+  "mustard",
+  "aioli",
+];
+
+function isBurgerName(name: string) {
+  return includesAny(normalize(name), BURGER_HINTS);
+}
+
+function isSauceName(name: string) {
+  return includesAny(normalize(name), SAUCE_HINTS);
 }
 
 export function isAnchorCategory(categoryName: string) {
@@ -87,6 +131,9 @@ export function isAnchorCategory(categoryName: string) {
     "სუპ",
     "vegetarian",
     "ვეგეტარ",
+    "burger",
+    "ბურგერ",
+    "бургер",
   ]);
 }
 
@@ -96,7 +143,10 @@ function kindOfDish(
 ): CrossSellKind | null {
   const category =
     categories.find((row) => row.id === dish.category_id)?.name ?? "";
-  return companionKind(category);
+  const fromCategory = companionKind(category);
+  if (fromCategory) return fromCategory;
+  if (isSauceName(dish.name)) return "side";
+  return null;
 }
 
 function hashSeed(value: string) {
@@ -121,14 +171,28 @@ function drinkBoost(dishName: string, hints: string[]) {
 
 function drinkHintsForAnchor(anchorName: string, categoryName: string) {
   const blob = normalize(`${anchorName} ${categoryName}`);
+  if (includesAny(blob, BURGER_HINTS)) {
+    return [
+      "beer",
+      "ლუდი",
+      "пиво",
+      "natakhtari",
+      "ნატახტარ",
+      "kazbegi",
+      "ყაზბეგ",
+    ];
+  }
   if (includesAny(blob, ["khinkali", "ხინკალ", "хинкал"])) {
-    return ["beer", "ლუდი", "пиво", "lemonade", "limon"];
+    return ["beer", "ლუდი", "пиво", "lemonade", "limon", "tarragon", "ტარხუნ"];
   }
   if (includesAny(blob, ["khachapuri", "ხაჭაპურ", "хачапур"])) {
-    return ["wine", "ღვინო", "вино", "tarragon", "ტარხუნ"];
+    return ["lemonade", "limon", "tarragon", "ტარხუნ"];
   }
-  if (includesAny(blob, ["grill", "მწვად", "fish", "თევზ"])) {
-    return ["wine", "ღვინო", "beer", "ლუდი"];
+  if (includesAny(blob, ["chicken", "ქათამ", "fish", "თევზ", "shrimp"])) {
+    return ["lemonade", "limon", "rkatsiteli", "რქაწითელ"];
+  }
+  if (includesAny(blob, ["mtsvadi", "მწვად", "chashushuli", "ჩაშუშულ"])) {
+    return ["saperavi", "საფერავ", "kindzmarauli", "ქინძმარაულ"];
   }
   return [];
 }
@@ -139,22 +203,36 @@ function cartContext(
   dishes: CrossSellDish[],
   categories: CategoryRef[],
   inCart: Set<string>,
+  lastAddedId?: string,
 ) {
   const categoryById = new Map(categories.map((row) => [row.id, row.name]));
   const cartKinds = new Set<CrossSellKind>();
   let hasAnchor = false;
+  let lastIsDrink = false;
   let hints: string[] = [];
+  let lastHints: string[] = [];
   for (const dish of dishes) {
     if (!inCart.has(dish.id)) continue;
     const category = categoryById.get(dish.category_id) ?? "";
-    const kind = companionKind(category);
+    const kind = kindOfDish(dish, categories);
     if (kind) cartKinds.add(kind);
-    if (isAnchorCategory(category)) {
+    if (lastAddedId && dish.id === lastAddedId && kind === "drink") {
+      lastIsDrink = true;
+    }
+    const burger = isBurgerName(dish.name);
+    if (isAnchorCategory(category) || burger) {
       hasAnchor = true;
-      if (!hints.length) hints = drinkHintsForAnchor(dish.name, category);
+      const nextHints = drinkHintsForAnchor(dish.name, category);
+      if (!hints.length) hints = nextHints;
+      if (lastAddedId && dish.id === lastAddedId) lastHints = nextHints;
     }
   }
-  return { cartKinds, hasAnchor, hints };
+  return {
+    cartKinds,
+    hasAnchor,
+    lastIsDrink,
+    hints: lastHints.length ? lastHints : hints,
+  };
 }
 
 function sortCompanions(
@@ -207,17 +285,27 @@ export function pickCrossSells({
   categories,
   cartIds,
   seed = "",
+  lastAddedId,
   limit = 3,
 }: {
   dishes: CrossSellDish[];
   categories: CategoryRef[];
   cartIds: Iterable<string>;
   seed?: string;
+  lastAddedId?: string;
   limit?: number;
 }): CrossSellDish[] {
   const inCart = new Set(cartIds);
-  const { cartKinds, hasAnchor, hints } = cartContext(dishes, categories, inCart);
-  if (!hasAnchor) return [];
+  const { cartKinds, hasAnchor, lastIsDrink, hints } = cartContext(
+    dishes,
+    categories,
+    inCart,
+    lastAddedId || seed,
+  );
+  if (lastIsDrink) {
+    cartKinds.add("drink");
+  }
+  if (!hasAnchor && !lastIsDrink) return [];
 
   const byKind: Record<CrossSellKind, CrossSellDish[]> = {
     drink: [],
@@ -237,9 +325,11 @@ export function pickCrossSells({
   }
 
   const missing = KIND_ORDER.filter((kind) => !cartKinds.has(kind));
-  const fillOrder = [
-    ...missing,
-    ...KIND_ORDER.filter((kind) => cartKinds.has(kind)),
-  ];
+  const fillOrder = lastIsDrink
+    ? (["side", "dessert"] as CrossSellKind[])
+    : [
+        ...missing,
+        ...KIND_ORDER.filter((kind) => cartKinds.has(kind) && kind !== "drink"),
+      ];
   return pickFromKinds(fillOrder, byKind, limit);
 }

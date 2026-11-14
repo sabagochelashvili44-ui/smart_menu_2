@@ -120,7 +120,11 @@ export function ShiftBulletinBoard({
       const res = await fetch("/api/shift-notes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, body }),
+        body: JSON.stringify({
+          restaurant_id: restaurantId,
+          title: title.trim(),
+          content: body.trim(),
+        }),
       });
       const json = (await res.json()) as { note?: ShiftNote; error?: string };
       const saved = json.note;

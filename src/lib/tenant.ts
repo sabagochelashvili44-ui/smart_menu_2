@@ -235,9 +235,11 @@ async function queryRestaurantsForLoginEmail(email: string) {
     // Fall through to table queries.
   }
 
-  const staffed = await queryRestaurantsForStaffEmail(normalized);
-  if (staffed.length > 0) return staffed;
-  return loadRestaurantsForEmail(normalized);
+  const [staffed, managed] = await Promise.all([
+    queryRestaurantsForStaffEmail(normalized),
+    loadRestaurantsForEmail(normalized),
+  ]);
+  return uniqueRestaurants([...managed, ...staffed]);
 }
 
 /** Session-scoped lookup: JWT user + restaurants visible to that user (RLS). */
@@ -274,19 +276,14 @@ export async function resolveRestaurantFromSession() {
   }
 }
 
-/** Staff row first, then restaurants.manager_email, then session-visible rows. */
-export async function resolveRestaurantForUser(
-  user: User,
-  preferredSlug?: string | null,
-) {
+/** All restaurants linked to the signed-in user (via staff membership or manager_email). */
+export async function listRestaurantsForUser(user: User) {
   try {
     const emails = emailsForUser(user);
-    const preferredId = await readTenantCookieId();
     const pool: AdminRestaurant[] = [];
 
     for (const email of emails) {
       pool.push(...(await queryRestaurantsForLoginEmail(email)));
-      if (pool.length > 0) break;
     }
 
     let unique = uniqueRestaurants(pool);
@@ -295,6 +292,20 @@ export async function resolveRestaurantForUser(
       if (sessionRestaurant) unique = [sessionRestaurant];
     }
 
+    return unique;
+  } catch {
+    return [] as AdminRestaurant[];
+  }
+}
+
+/** Staff row first, then restaurants.manager_email, then session-visible rows. */
+export async function resolveRestaurantForUser(
+  user: User,
+  preferredSlug?: string | null,
+) {
+  try {
+    const preferredId = await readTenantCookieId();
+    const unique = await listRestaurantsForUser(user);
     return pickPreferredRestaurant(unique, { preferredId, preferredSlug });
   } catch {
     return null;
@@ -341,6 +352,7 @@ function emptyTenantAccess() {
   return {
     user: null,
     restaurant: null,
+    restaurants: [] as AdminRestaurant[],
     isSuperAdmin: false as const,
     isRestaurantManager: false as const,
     viewingAs: null,
@@ -352,22 +364,37 @@ async function restaurantForAccess(user: User, isSuperAdmin: boolean) {
   if (isSuperAdmin) {
     const viewAsId = await readViewAsRestaurantId();
     const viewingAs = viewAsId ? await loadRestaurantById(viewAsId) : null;
-    return { restaurant: viewingAs, viewingAs };
+    return {
+      restaurant: viewingAs,
+      restaurants: viewingAs ? [viewingAs] : ([] as AdminRestaurant[]),
+      viewingAs,
+    };
   }
+  let restaurants: AdminRestaurant[] = [];
   let restaurant: AdminRestaurant | null = null;
   try {
-    restaurant = await resolveRestaurantForUser(user);
+    const preferredId = await readTenantCookieId();
+    restaurants = await listRestaurantsForUser(user);
+    restaurant = pickPreferredRestaurant(restaurants, { preferredId });
   } catch {
+    restaurants = [];
     restaurant = null;
   }
   if (!restaurant) {
     try {
       restaurant = await resolveRestaurantFromSession();
+      if (restaurant && !restaurants.some((row) => row.id === restaurant!.id)) {
+        restaurants = [restaurant, ...restaurants];
+      }
     } catch {
       restaurant = null;
     }
   }
-  return { restaurant, viewingAs: null as AdminRestaurant | null };
+  return {
+    restaurant,
+    restaurants,
+    viewingAs: null as AdminRestaurant | null,
+  };
 }
 
 export const requireTenantRestaurant = cache(async () => {
@@ -382,7 +409,10 @@ export const requireTenantRestaurant = cache(async () => {
       isSuperAdmin = false;
     }
 
-    const { restaurant, viewingAs } = await restaurantForAccess(user, isSuperAdmin);
+    const { restaurant, restaurants, viewingAs } = await restaurantForAccess(
+      user,
+      isSuperAdmin,
+    );
     const staffRole = restaurant
       ? await resolveStaffRole({
           email: user.email,
@@ -395,6 +425,7 @@ export const requireTenantRestaurant = cache(async () => {
     return {
       user,
       restaurant,
+      restaurants,
       isSuperAdmin,
       isRestaurantManager: Boolean(restaurant) && !isSuperAdmin,
       viewingAs,
@@ -575,3 +606,29 @@ export async function setSuperAdminViewAs(restaurantId: string | null) {
   await writeViewAsCookie(restaurant.id);
   return { error: null as string | null };
 }
+
+export async function switchTenantRestaurant(restaurantId: string) {
+  const cleanId = restaurantId.trim();
+  if (!RESTAURANT_ID_RE.test(cleanId)) {
+    return { error: "Invalid restaurant ID." };
+  }
+  const user = await getSessionUser();
+  if (!user) {
+    return { error: "Not signed in." };
+  }
+
+  const isSuperAdmin = await isSuperAdminUser(user).catch(() => false);
+  if (isSuperAdmin) {
+    return setSuperAdminViewAs(cleanId);
+  }
+
+  const accessible = await listRestaurantsForUser(user);
+  const target = accessible.find((row) => row.id === cleanId);
+  if (!target) {
+    return { error: "Forbidden." };
+  }
+
+  await writeTenantCookie(target.id);
+  return { error: null as string | null, restaurantId: target.id };
+}
+

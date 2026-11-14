@@ -1,7 +1,9 @@
 import { BrandTheme } from "@/components/brand-theme";
+import { ClosedMenuNotice } from "@/components/menu/closed-menu-notice";
 import { RestaurantMenu } from "@/components/menu/restaurant-menu";
 import { SuspendedMenuNotice } from "@/components/menu/suspended-menu-notice";
 import { loadGuestMenu } from "@/lib/load-guest-menu";
+import { isRestaurantOpen } from "@/lib/opening-hours";
 import { isSubscriptionSuspended } from "@/lib/restaurant-brand";
 import { notFound } from "next/navigation";
 
@@ -23,13 +25,26 @@ export async function GuestMenuView({
     );
   }
 
+  if (!isRestaurantOpen(menu.restaurant)) {
+    return (
+      <BrandTheme brand={menu.restaurant}>
+        <ClosedMenuNotice
+          restaurantName={menu.restaurant.name}
+          hours={menu.restaurant}
+        />
+      </BrandTheme>
+    );
+  }
+
   return (
     <BrandTheme brand={menu.restaurant}>
       <RestaurantMenu
+        key={menu.restaurant.id}
         restaurant={menu.restaurant}
         table={menu.table}
         categories={menu.categories}
         dishes={menu.dishes}
+        quickPrompts={menu.quickPrompts}
       />
     </BrandTheme>
   );

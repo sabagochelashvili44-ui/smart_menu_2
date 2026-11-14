@@ -14,9 +14,19 @@ import {
   syncServiceFeeLine,
   ticketPriceBreakdown,
 } from "@/lib/service-fee";
-import { waiterCallItemsTotal } from "@/lib/waiter-call-items";
+import { parseDrinkPour } from "@/lib/menu-lane";
+import {
+  foodBatch,
+  kitchenTimerAt,
+  waiterCallItemsTotal,
+} from "@/lib/waiter-call-items";
 import { createSupabaseBrowserClient } from "@/lib/supabase/browser";
 import {
+  filterFloorServiceTickets,
+  filterKitchenBoardTickets,
+  filterKitchenOrderTickets,
+  isFloorServiceTicket,
+  isKitchenOrderTicket,
   parseWaiterCallType,
   WAITER_CALL_LABELS,
   WAITER_CALL_STYLE,
@@ -35,6 +45,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const CHIME_URL =
   "https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3";
+/** Realtime is primary; poll is a slow safety net. */
+const KITCHEN_POLL_MS = 15_000;
+const POLL_KEEP_MS = 20000;
 
 type KitchenAudioContext = AudioContext;
 
@@ -93,14 +106,32 @@ function isIncomingCallStatus(status: string) {
   return status === "open" || status === "pending";
 }
 
-function isPendingKitchenStatus(status: string) {
-  return (
-    status === "open" || status === "pending" || status === "preparing"
-  );
-}
-
 function isAcknowledgedKitchenStatus(status: string) {
   return normalizeKitchenStatus(status) === "acknowledged";
+}
+
+function isKitchenReceived(call: WaiterCallAlert) {
+  if (call.ready_at) return false;
+  const status = normalizeKitchenStatus(call.status) || call.status;
+  return status === "open" || status === "pending";
+}
+
+function isKitchenInProgress(call: WaiterCallAlert) {
+  if (call.ready_at) return false;
+  const status = normalizeKitchenStatus(call.status) || call.status;
+  return status === "preparing" || isAcknowledgedKitchenStatus(status);
+}
+
+function isKitchenIncoming(call: WaiterCallAlert) {
+  return isKitchenReceived(call) || isKitchenInProgress(call);
+}
+
+function isKitchenReady(call: WaiterCallAlert) {
+  return Boolean(call.ready_at) || (
+    isAcknowledgedKitchenStatus(call.status) &&
+    !isKitchenInProgress(call) &&
+    !isKitchenReceived(call)
+  );
 }
 
 function shouldShowOrderTotal(call: WaiterCallAlert) {
@@ -153,12 +184,103 @@ function KitchenTicketTotals({
   );
 }
 
-function elapsed(iso: string, unit: string) {
-  const mins = Math.max(
-    0,
-    Math.floor((Date.now() - new Date(iso).getTime()) / 60000),
-  );
+const SLA_WARN_MS = 2 * 60 * 1000;
+const SLA_OVERDUE_MS = 3 * 60 * 1000;
+
+function ageMs(iso: string, now: number) {
+  const stamp = new Date(iso).getTime();
+  if (!Number.isFinite(stamp)) return 0;
+  return Math.max(0, now - stamp);
+}
+
+function elapsed(iso: string, unit: string, now = Date.now()) {
+  const mins = Math.floor(ageMs(iso, now) / 60000);
   return `${mins}${unit}`;
+}
+
+function slaLevel(
+  call: WaiterCallAlert,
+  now: number,
+): "ok" | "warn" | "overdue" {
+  if (!isKitchenIncoming(call)) return "ok";
+  const age = ageMs(callTimerAt(call), now);
+  if (age >= SLA_OVERDUE_MS) return "overdue";
+  if (age >= SLA_WARN_MS) return "warn";
+  return "ok";
+}
+
+function callTimerAt(call: WaiterCallAlert) {
+  return kitchenTimerAt(call.created_at, call.items);
+}
+
+function pendingTicketClass(call: WaiterCallAlert, now: number) {
+  const sla = slaLevel(call, now);
+  if (sla === "overdue") {
+    return "rounded-lg border-2 border-red-600 bg-red-50 p-3 dark:bg-red-950/50";
+  }
+  if (sla === "warn") {
+    return "rounded-lg border-2 border-amber-500 bg-amber-50 p-3 dark:bg-amber-950/40";
+  }
+  return `rounded-lg border p-3 ${
+    call.call_type
+      ? WAITER_CALL_STYLE[call.call_type].card
+      : "border-amber-500/40 bg-amber-50 dark:bg-amber-950/30"
+  }`;
+}
+
+function splitFoodLines<T extends { batch?: number; dish_id: string }>(items: T[]) {
+  const food = items.filter((item) => !isServiceFeeItem(item));
+  const newest = food.reduce((max, item) => Math.max(max, foodBatch(item)), 1);
+  if (newest <= 1) {
+    return { previous: food, added: [] as T[] };
+  }
+  return {
+    previous: food.filter((item) => foodBatch(item) < newest),
+    added: food.filter((item) => foodBatch(item) === newest),
+  };
+}
+
+function KitchenFoodList({
+  callId,
+  callType,
+  items,
+  locale,
+  newLabel,
+  showNewBadge = false,
+}: {
+  callId: string;
+  callType: WaiterCallType | null;
+  items: WaiterCallAlert["items"];
+  locale: "ka" | "en" | "ru";
+  newLabel: string;
+  showNewBadge?: boolean;
+}) {
+  const { t } = useAdminLocale();
+  return (
+    <ul className="text-sm">
+      {items.map((item, index) => (
+        <li key={`${callId}-${item.dish_id}-${item.batch ?? 1}-${index}`}>
+          {callType === "low_rating"
+            ? item.name
+            : `${item.quantity}× ${dishLabel(item.name, locale)}${
+                item.pour === "glass"
+                  ? ` · ${t.priceGlass}`
+                  : item.pour === "bottle"
+                    ? ` · ${t.priceBottle}`
+                    : ""
+              }`}
+          {showNewBadge ? (
+            <Badge className="ml-1.5 align-middle">{newLabel}</Badge>
+          ) : null}
+          {item.note ? (
+            <p className="mt-0.5 rounded-md bg-amber-100 px-1.5 py-0.5 text-xs font-semibold text-amber-950 dark:bg-amber-900/70 dark:text-amber-50">
+              {t.itemNote}: {item.note}
+            </p>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 function parseItems(raw: unknown): WaiterCallAlert["items"] {
@@ -173,11 +295,22 @@ function parseItems(raw: unknown): WaiterCallAlert["items"] {
   return raw
     .map((item) => {
       const row = item as Record<string, unknown>;
+      const note = String(row.note ?? "").trim().slice(0, 200);
+      const batch = Math.floor(Number(row.batch) || 0);
+      const addedAt = String(row.added_at ?? "").trim();
+      const addedMs = Date.parse(addedAt);
+      const pour = parseDrinkPour(row.pour);
       return {
         dish_id: String(row.dish_id ?? ""),
         name: String(row.name ?? "Item"),
         quantity: Number(row.quantity) || 0,
         unit_price: Number(row.unit_price) || 0,
+        ...(note ? { note } : {}),
+        ...(batch >= 1 ? { batch } : {}),
+        ...(Number.isFinite(addedMs)
+          ? { added_at: new Date(addedMs).toISOString() }
+          : {}),
+        ...(pour ? { pour } : {}),
       };
     })
     .filter((item) => item.quantity > 0);
@@ -200,13 +333,22 @@ function toWaiterCall(
     restaurant_id: String(row.restaurant_id ?? existing?.restaurant_id ?? ""),
     table_id: String(row.table_id ?? existing?.table_id ?? ""),
     table_number: String(row.table_number ?? existing?.table_number ?? ""),
-    items: row.items === undefined ? existing?.items ?? [] : parseItems(row.items),
+    items:
+      row.items === undefined
+        ? existing?.items ?? []
+        : preferItems(existing?.items, parseItems(row.items)),
     status,
     call_type:
       row.call_type === undefined
         ? (existing?.call_type ?? parseWaiterCallType(undefined))
         : parseWaiterCallType(row.call_type),
     created_at: String(row.created_at ?? existing?.created_at ?? ""),
+    ready_at:
+      row.ready_at === undefined
+        ? existing?.ready_at
+        : row.ready_at
+          ? String(row.ready_at)
+          : existing?.ready_at ?? null,
   };
 }
 
@@ -234,10 +376,14 @@ function toKitchenCallFromOrder(
     restaurant_id: String(row.restaurant_id ?? existing?.restaurant_id ?? ""),
     table_id: String(row.table_id ?? existing?.table_id ?? ""),
     table_number: String(row.table_number ?? existing?.table_number ?? ""),
-    items: row.items === undefined ? existing?.items ?? [] : parseItems(row.items),
+    items:
+      row.items === undefined
+        ? existing?.items ?? []
+        : preferItems(existing?.items, parseItems(row.items)),
     status,
     call_type: existing?.call_type ?? null,
     created_at: String(row.created_at ?? existing?.created_at ?? ""),
+    ready_at: existing?.ready_at ?? null,
   };
 }
 
@@ -274,12 +420,63 @@ function CallTypeRow({
   );
 }
 
+function foodLineCount(items: WaiterCallAlert["items"] | undefined) {
+  return (items ?? []).filter((item) => !isServiceFeeItem(item)).length;
+}
+
+function maxFoodBatch(items: WaiterCallAlert["items"] | undefined) {
+  return (items ?? []).reduce(
+    (max, item) => Math.max(max, foodBatch(item)),
+    1,
+  );
+}
+
+/** Keep the richer ticket body so a status-only patch cannot wipe dishes. */
+function preferItems(
+  local: WaiterCallAlert["items"] | undefined,
+  remote: WaiterCallAlert["items"] | undefined,
+): WaiterCallAlert["items"] {
+  const fromLocal = local ?? [];
+  const fromRemote = remote ?? [];
+  if (!fromRemote.length && fromLocal.length) return fromLocal;
+  if (!fromLocal.length) return fromRemote;
+  const localFood = foodLineCount(fromLocal);
+  const remoteFood = foodLineCount(fromRemote);
+  if (remoteFood > localFood) return fromRemote;
+  if (localFood > remoteFood) return fromLocal;
+  if (maxFoodBatch(fromRemote) > maxFoodBatch(fromLocal)) return fromRemote;
+  return fromLocal;
+}
+
+function mergeKitchenCall(
+  local: WaiterCallAlert | undefined,
+  remote: WaiterCallAlert,
+): WaiterCallAlert {
+  if (!local) return remote;
+  const remoteIncoming = isIncomingCallStatus(
+    normalizeKitchenStatus(remote.status) || remote.status,
+  );
+  const keepAck =
+    isAcknowledgedKitchenStatus(local.status) && remoteIncoming;
+  return {
+    ...local,
+    ...remote,
+    items: preferItems(local.items, remote.items),
+    status: keepAck ? local.status : remote.status || local.status,
+    ready_at: remote.ready_at || local.ready_at || null,
+    call_type: remote.call_type ?? local.call_type,
+    table_number: remote.table_number || local.table_number,
+  };
+}
+
 function upsertCall(current: WaiterCallAlert[], call: WaiterCallAlert) {
   if (call.status === "cancelled") {
     return current.filter((row) => row.id !== call.id);
   }
-  if (current.some((row) => row.id === call.id)) {
-    return current.map((row) => (row.id === call.id ? call : row));
+  const existing = current.find((row) => row.id === call.id);
+  if (existing) {
+    const merged = mergeKitchenCall(existing, call);
+    return current.map((row) => (row.id === call.id ? merged : row));
   }
   return [call, ...current];
 }
@@ -298,6 +495,29 @@ function applyKitchenRow(
   return upsertCall(current, call);
 }
 
+function mergePolledCalls(
+  previous: WaiterCallAlert[],
+  incoming: WaiterCallAlert[],
+  missingSince: Map<string, number>,
+  now = Date.now(),
+) {
+  const previousById = new Map(previous.map((call) => [call.id, call]));
+  const incomingIds = new Set(incoming.map((call) => call.id));
+  const merged = incoming.map((call) => {
+    missingSince.delete(call.id);
+    return mergeKitchenCall(previousById.get(call.id), call);
+  });
+  for (const call of previous) {
+    if (incomingIds.has(call.id)) continue;
+    const firstMissing = missingSince.get(call.id) ?? now;
+    missingSince.set(call.id, firstMissing);
+    if (now - firstMissing <= POLL_KEEP_MS && isKitchenOrderTicket(call)) {
+      merged.push(call);
+    }
+  }
+  return merged;
+}
+
 export function KitchenBoard({
   restaurantId,
   initialCalls,
@@ -311,19 +531,37 @@ export function KitchenBoard({
 }) {
   const { locale, t } = useAdminLocale();
   const [calls, setCalls] = useState<WaiterCallAlert[]>(initialCalls);
+  const [now, setNow] = useState(() => Date.now());
   const [tab, setTab] = useState<"pending" | "acknowledged">("pending");
   const [editingCall, setEditingCall] = useState<WaiterCallAlert | null>(null);
   const [soundOn, setSoundOn] = useState(false);
   const soundOnRef = useRef(false);
   const chimeRef = useRef<HTMLAudioElement | null>(null);
   const audioCtxRef = useRef<KitchenAudioContext | null>(null);
+  const callsRef = useRef(calls);
+  callsRef.current = calls;
+  const seededPollRef = useRef(false);
+  const dismissedIdsRef = useRef(new Set<string>());
+  const missingPollIdsRef = useRef(new Map<string, number>());
+
+  function withoutDismissed(list: WaiterCallAlert[]) {
+    const hidden = dismissedIdsRef.current;
+    if (hidden.size === 0) return list;
+    return list.filter((call) => !hidden.has(call.id));
+  }
 
   useEffect(() => {
+    dismissedIdsRef.current.clear();
     setCalls(initialCalls);
     // Only reset when switching restaurants so Realtime patches are not wiped
     // by a stale Server Component snapshot.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- restaurant-scoped seed
   }, [restaurantId]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const ensureAudioContext = useCallback(async () => {
     const Ctor = getAudioContextConstructor();
@@ -361,6 +599,8 @@ export function KitchenBoard({
       playSynthesizedChime(ctx);
     }
   }, [ensureAudioContext]);
+  const playChimeRef = useRef(playChime);
+  playChimeRef.current = playChime;
 
   async function toggleSound() {
     if (soundOn) {
@@ -398,6 +638,67 @@ export function KitchenBoard({
   useEffect(() => {
     const supabase = createSupabaseBrowserClient();
     const tenantFilter = `restaurant_id=eq.${restaurantId}`;
+    let cancelled = false;
+    let inFlight = false;
+    let debounce: number | null = null;
+    seededPollRef.current = false;
+
+    async function refreshCalls() {
+      if (inFlight || cancelled) return;
+      inFlight = true;
+      try {
+        const response = await fetch(`/api/waiter-calls?ts=${Date.now()}`, {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-cache" },
+        });
+        const json = (await response.json().catch(() => null)) as {
+          calls?: Record<string, unknown>[];
+        } | null;
+        if (!response.ok || !Array.isArray(json?.calls) || cancelled) return;
+
+        const next = filterKitchenBoardTickets(
+          json.calls.map((row) => {
+            const local = callsRef.current.find(
+              (call) => call.id === String(row.id ?? ""),
+            );
+            return toWaiterCall(row, local);
+          }),
+        );
+
+        const merged = withoutDismissed(
+          mergePolledCalls(
+            callsRef.current,
+            next,
+            missingPollIdsRef.current,
+          ),
+        );
+        if (!seededPollRef.current) {
+          seededPollRef.current = true;
+          setCalls(merged);
+          return;
+        }
+
+        const prevIds = new Set(callsRef.current.map((call) => call.id));
+        const newcomers = merged.filter(
+          (call) => !prevIds.has(call.id) && isKitchenReceived(call),
+        );
+        if (soundOnRef.current && newcomers.length > 0) {
+          void playChimeRef.current();
+        }
+        setCalls(merged);
+      } catch {
+        // Keep the last live snapshot if polling fails.
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    function scheduleRefresh() {
+      if (debounce != null) window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => {
+        void refreshCalls();
+      }, 250);
+    }
 
     const onWaiterChange = (payload: {
       eventType?: string;
@@ -407,20 +708,54 @@ export function KitchenBoard({
       if (payload.eventType === "DELETE") {
         const id = String(payload.old?.id ?? "");
         if (!id) return;
+        dismissedIdsRef.current.add(id);
         setCalls((current) => current.filter((row) => row.id !== id));
         return;
       }
       const row = payload.new;
-      if (!row) return;
-      const incoming = toWaiterCall(row);
-      setCalls((current) => applyKitchenRow(current, "waiter_calls", row));
-      if (
-        payload.eventType === "INSERT" &&
-        isIncomingCallStatus(incoming.status) &&
-        (soundOnRef.current || incoming.call_type === "low_rating")
-      ) {
-        void playChime();
+      if (!row) {
+        scheduleRefresh();
+        return;
       }
+      const rowId = String(row.id ?? "");
+      if (row.archived_at) {
+        if (rowId) {
+          dismissedIdsRef.current.add(rowId);
+          setCalls((current) => current.filter((item) => item.id !== rowId));
+        }
+        return;
+      }
+      if (rowId && dismissedIdsRef.current.has(rowId)) return;
+      const incoming = toWaiterCall(row);
+      if (incoming.call_type === "low_rating") {
+        if (rowId) {
+          setCalls((current) => current.filter((item) => item.id !== rowId));
+        }
+        return;
+      }
+      setCalls((current) => {
+        const existing = current.find((item) => item.id === rowId);
+        if (
+          !existing &&
+          !isKitchenOrderTicket(incoming) &&
+          !isFloorServiceTicket(incoming)
+        ) {
+          return current;
+        }
+        return withoutDismissed(applyKitchenRow(current, "waiter_calls", row));
+      });
+      if (
+        (payload.eventType === "INSERT" &&
+          isKitchenIncoming(incoming) &&
+          soundOnRef.current) ||
+        (payload.eventType === "UPDATE" &&
+          String(payload.old?.status ?? "") === "acknowledged" &&
+          isIncomingCallStatus(incoming.status) &&
+          soundOnRef.current)
+      ) {
+        void playChimeRef.current();
+      }
+      scheduleRefresh();
     };
 
     const onOrderChange = (payload: {
@@ -431,20 +766,31 @@ export function KitchenBoard({
       if (payload.eventType === "DELETE") {
         const id = String(payload.old?.id ?? "");
         if (!id) return;
+        dismissedIdsRef.current.add(id);
         setCalls((current) => current.filter((row) => row.id !== id));
         return;
       }
       const row = payload.new;
-      if (!row) return;
+      if (!row) {
+        scheduleRefresh();
+        return;
+      }
+      const rowId = String(row.id ?? "");
+      if (rowId && dismissedIdsRef.current.has(rowId)) return;
       const incoming = toKitchenCallFromOrder(row);
-      setCalls((current) => applyKitchenRow(current, "orders", row));
+      setCalls((current) => {
+        const existing = current.find((item) => item.id === rowId);
+        if (!existing && !isKitchenOrderTicket(incoming)) return current;
+        return withoutDismissed(applyKitchenRow(current, "orders", row));
+      });
       if (
         payload.eventType === "INSERT" &&
-        isIncomingCallStatus(incoming.status) &&
+        isKitchenIncoming(incoming) &&
         soundOnRef.current
       ) {
-        void playChime();
+        void playChimeRef.current();
       }
+      scheduleRefresh();
     };
 
     const channel = supabase
@@ -452,7 +798,7 @@ export function KitchenBoard({
       .on(
         "postgres_changes",
         {
-          event: "INSERT",
+          event: "*",
           schema: "public",
           table: "waiter_calls",
           filter: tenantFilter,
@@ -462,59 +808,37 @@ export function KitchenBoard({
       .on(
         "postgres_changes",
         {
-          event: "UPDATE",
-          schema: "public",
-          table: "waiter_calls",
-          filter: tenantFilter,
-        },
-        onWaiterChange,
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "DELETE",
-          schema: "public",
-          table: "waiter_calls",
-          filter: tenantFilter,
-        },
-        onWaiterChange,
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
+          event: "*",
           schema: "public",
           table: "orders",
           filter: tenantFilter,
         },
         onOrderChange,
       )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "orders",
-          filter: tenantFilter,
-        },
-        onOrderChange,
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "DELETE",
-          schema: "public",
-          table: "orders",
-          filter: tenantFilter,
-        },
-        onOrderChange,
-      )
-      .subscribe();
+      .subscribe((status: string) => {
+        if (status === "SUBSCRIBED") void refreshCalls();
+      });
+
+    void refreshCalls();
+    const timer = window.setInterval(() => {
+      void refreshCalls();
+    }, KITCHEN_POLL_MS);
+
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refreshCalls();
+    };
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
 
     return () => {
+      cancelled = true;
+      if (debounce != null) window.clearTimeout(debounce);
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
       void supabase.removeChannel(channel);
     };
-  }, [playChime, restaurantId]);
+  }, [restaurantId]);
 
   async function acknowledgeCall(id: string) {
     const previous = calls.find((call) => call.id === id);
@@ -523,6 +847,7 @@ export function KitchenBoard({
         call.id === id ? { ...call, status: "acknowledged" } : call,
       ),
     );
+    setTab("acknowledged");
     try {
       const response = await fetch(`/api/waiter-calls/${id}`, {
         method: "PATCH",
@@ -547,6 +872,10 @@ export function KitchenBoard({
           applyKitchenRow(current, "waiter_calls", {
             ...updatedCall,
             status: updatedCall.status ?? "acknowledged",
+            items:
+              updatedCall.items === undefined
+                ? previous?.items
+                : updatedCall.items,
           }),
         );
       }
@@ -559,10 +888,51 @@ export function KitchenBoard({
     }
   }
 
+  async function markReady(id: string) {
+    const previous = calls.find((call) => call.id === id);
+    const readyAt = new Date().toISOString();
+    setCalls((current) =>
+      current.map((call) =>
+        call.id === id ? { ...call, ready_at: readyAt } : call,
+      ),
+    );
+    try {
+      const response = await fetch(`/api/waiter-calls/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ready: true }),
+      });
+      if (!response.ok && previous) {
+        setCalls((current) =>
+          current.map((call) => (call.id === id ? previous : call)),
+        );
+      }
+    } catch {
+      if (previous) {
+        setCalls((current) =>
+          current.map((call) => (call.id === id ? previous : call)),
+        );
+      }
+    }
+  }
+
   async function cancelCall(id: string) {
+    const previous = calls;
+    dismissedIdsRef.current.add(id);
     setCalls((current) => current.filter((call) => call.id !== id));
     if (editingCall?.id === id) setEditingCall(null);
-    await fetch(`/api/waiter-calls/${id}`, { method: "DELETE" });
+    try {
+      const response = await fetch(`/api/waiter-calls/${id}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        dismissedIdsRef.current.delete(id);
+        setCalls(previous);
+      }
+    } catch {
+      dismissedIdsRef.current.delete(id);
+      setCalls(previous);
+    }
   }
 
   async function saveEditedItems(items: WaiterCallLine[]) {
@@ -596,22 +966,86 @@ export function KitchenBoard({
   }
 
   async function clearAcknowledgedHistory() {
+    const previous = calls;
+    const ids = calls
+      .filter((call) => isKitchenOrderTicket(call) && isKitchenReady(call))
+      .map((call) => call.id);
+    for (const id of ids) dismissedIdsRef.current.add(id);
     setCalls((current) =>
-      current.filter((call) => !isAcknowledgedKitchenStatus(call.status)),
+      current.filter(
+        (call) => !(isKitchenOrderTicket(call) && isKitchenReady(call)),
+      ),
     );
-    await fetch(
-      `/api/waiter-calls?restaurantId=${restaurantId}&status=acknowledged`,
-      { method: "DELETE" },
-    );
+    try {
+      const response = await fetch("/api/waiter-calls", { method: "DELETE" });
+      if (!response.ok) {
+        for (const id of ids) dismissedIdsRef.current.delete(id);
+        setCalls(previous);
+        return;
+      }
+      const refresh = await fetch("/api/waiter-calls", { cache: "no-store" });
+      const json = (await refresh.json().catch(() => null)) as {
+        calls?: Record<string, unknown>[];
+      } | null;
+      if (!refresh.ok || !Array.isArray(json?.calls)) return;
+      setCalls(
+        withoutDismissed(
+          filterKitchenBoardTickets(json.calls.map((row) => toWaiterCall(row))),
+        ),
+      );
+    } catch {
+      for (const id of ids) dismissedIdsRef.current.delete(id);
+      setCalls(previous);
+    }
   }
 
-  const pending = useMemo(
-    () => calls.filter((call) => isPendingKitchenStatus(call.status)),
+  async function completeFloorCall(id: string) {
+    const previous = calls;
+    dismissedIdsRef.current.add(id);
+    setCalls((current) => current.filter((call) => call.id !== id));
+    try {
+      const ack = await fetch(`/api/waiter-calls/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "acknowledged" }),
+      });
+      if (!ack.ok) {
+        dismissedIdsRef.current.delete(id);
+        setCalls(previous);
+        return;
+      }
+      const done = await fetch(`/api/waiter-calls/${id}`, { method: "DELETE" });
+      if (!done.ok) {
+        dismissedIdsRef.current.delete(id);
+        setCalls(previous);
+      }
+    } catch {
+      dismissedIdsRef.current.delete(id);
+      setCalls(previous);
+    }
+  }
+
+  const orderCalls = useMemo(
+    () => filterKitchenOrderTickets(calls),
     [calls],
   );
-  const acknowledged = useMemo(
-    () => calls.filter((call) => isAcknowledgedKitchenStatus(call.status)),
+  const floorCalls = useMemo(
+    () =>
+      filterFloorServiceTickets(calls).filter(
+        (call) => isKitchenReceived(call) || isKitchenInProgress(call),
+      ),
     [calls],
+  );
+  const pending = useMemo(
+    () => orderCalls.filter((call) => isKitchenReceived(call)),
+    [orderCalls],
+  );
+  const acknowledged = useMemo(
+    () =>
+      orderCalls.filter(
+        (call) => isKitchenInProgress(call) || isKitchenReady(call),
+      ),
+    [orderCalls],
   );
   const visible = tab === "pending" ? pending : acknowledged;
 
@@ -638,10 +1072,51 @@ export function KitchenBoard({
         </Button>
       </div>
 
+      <section className="rounded-xl border border-amber-500/35 bg-amber-50/40 p-3 dark:bg-amber-950/20">
+        <h3 className="mb-3 flex items-center gap-2 text-sm font-medium">
+          <BellIcon className="size-4" />
+          {t.floorService}
+          {floorCalls.length ? ` (${floorCalls.length})` : ""}
+        </h3>
+        {floorCalls.length === 0 ? (
+          <p className="text-muted-foreground text-sm">{t.noFloorCalls}</p>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {floorCalls.map((call) => {
+              const type = parseWaiterCallType(call.call_type);
+              const style = WAITER_CALL_STYLE[type];
+              return (
+                <article
+                  key={call.id}
+                  className={`rounded-lg border p-3 ${style.card}`}
+                >
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <Badge>
+                      {call.table_number || call.table_id.slice(0, 8)}
+                    </Badge>
+                    <span className="text-muted-foreground text-xs">
+                      {elapsed(callTimerAt(call), t.minutes, now)}
+                    </span>
+                  </div>
+                  <CallTypeRow type={type} locale={locale} />
+                  <Button
+                    size="sm"
+                    className="mt-2 w-full"
+                    onClick={() => void completeFloorCall(call.id)}
+                  >
+                    {t.markFloorDone}
+                  </Button>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
       <section className="rounded-xl border p-3">
         <h3 className="mb-3 flex items-center gap-2 text-sm font-medium">
           <BellIcon className="size-4" />
-          {t.waiterCalls}
+          {t.kitchenIncomingOrders}
         </h3>
 
         <div className="mb-3 grid grid-cols-2 gap-2">
@@ -651,7 +1126,7 @@ export function KitchenBoard({
             variant={tab === "pending" ? "default" : "outline"}
             onClick={() => setTab("pending")}
           >
-            {t.pendingCalls}
+            {t.kitchenActiveOrders}
             {pending.length ? ` (${pending.length})` : ""}
           </Button>
           <Button
@@ -660,7 +1135,7 @@ export function KitchenBoard({
             variant={tab === "acknowledged" ? "default" : "outline"}
             onClick={() => setTab("acknowledged")}
           >
-            {t.acknowledgedCalls}
+            {t.acknowledgedOrders}
             {acknowledged.length ? ` (${acknowledged.length})` : ""}
           </Button>
         </div>
@@ -681,44 +1156,89 @@ export function KitchenBoard({
 
         {visible.length === 0 ? (
           <p className="text-muted-foreground text-sm">
-            {tab === "pending" ? t.noWaiterCalls : t.noAcknowledgedCalls}
+            {tab === "pending" ? t.noKitchenOrders : t.noAcknowledgedOrders}
           </p>
         ) : (
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {visible.map((call) => (
+            {visible.map((call) => {
+              const incoming = isKitchenIncoming(call);
+              const timerAt = callTimerAt(call);
+              const sla = slaLevel(call, now);
+              return (
               <article
                 key={call.id}
                 className={
-                  isPendingKitchenStatus(call.status)
-                    ? `rounded-lg border p-3 ${
-                        call.call_type
-                          ? WAITER_CALL_STYLE[call.call_type].card
-                          : "border-amber-500/40 bg-amber-50 dark:bg-amber-950/30"
-                      }`
+                  incoming
+                    ? pendingTicketClass(call, now)
                     : "bg-muted/40 rounded-lg border p-3"
                 }
               >
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <Badge>{call.table_number || call.table_id.slice(0, 8)}</Badge>
-                  <span className="text-muted-foreground text-xs">
-                    {elapsed(call.created_at, t.minutes)}
+                  <span
+                    className={
+                      sla === "overdue"
+                        ? "text-xs font-bold text-red-700 dark:text-red-400"
+                        : sla === "warn"
+                          ? "text-xs font-semibold text-amber-800 dark:text-amber-300"
+                          : "text-muted-foreground text-xs"
+                    }
+                  >
+                    {elapsed(timerAt, t.minutes, now)}
+                    {sla === "overdue" ? ` · ${t.slaOverdue}` : ""}
                   </span>
                 </div>
-                {call.call_type ? (
+                {call.call_type && call.call_type !== "call_waiter" ? (
                   <CallTypeRow type={call.call_type} locale={locale} />
                 ) : null}
                 {call.items.length ? (
-                  <ul className="mb-2 text-sm">
-                    {call.items
-                      .filter((item) => !isServiceFeeItem(item))
-                      .map((item, index) => (
-                      <li key={`${call.id}-${item.dish_id}-${index}`}>
-                        {call.call_type === "low_rating"
-                          ? item.name
-                          : `${item.quantity}× ${dishLabel(item.name, locale)}`}
-                      </li>
-                    ))}
-                  </ul>
+                  (() => {
+                    const split = splitFoodLines(call.items);
+                    if (!split.added.length) {
+                      return (
+                        <div className="mb-2">
+                          <KitchenFoodList
+                            callId={call.id}
+                            callType={call.call_type}
+                            items={split.previous}
+                            locale={locale}
+                            newLabel={t.newAddition}
+                          />
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="mb-2 space-y-2">
+                        {split.previous.length ? (
+                          <div>
+                            <p className="text-muted-foreground mb-1 text-xs font-semibold tracking-wide uppercase">
+                              {t.alreadyOrdered}
+                            </p>
+                            <KitchenFoodList
+                              callId={call.id}
+                              callType={call.call_type}
+                              items={split.previous}
+                              locale={locale}
+                              newLabel={t.newAddition}
+                            />
+                          </div>
+                        ) : null}
+                        <div className="rounded-lg border-2 border-amber-500 bg-amber-50 p-2 dark:bg-amber-950/50">
+                          <p className="mb-1 text-xs font-bold tracking-wide text-amber-950 uppercase dark:text-amber-100">
+                            {t.justAdded}
+                          </p>
+                          <KitchenFoodList
+                            callId={`${call.id}-new`}
+                            callType={call.call_type}
+                            items={split.added}
+                            locale={locale}
+                            newLabel={t.newAddition}
+                            showNewBadge
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()
                 ) : call.call_type ? null : (
                   <Badge variant="secondary" className="mb-2">
                     {t.emptyWaiterCall}
@@ -734,7 +1254,7 @@ export function KitchenBoard({
                     totalLabel={t.kitchenOrderTotal}
                   />
                 ) : null}
-                {isPendingKitchenStatus(call.status) ? (
+                {isKitchenReceived(call) ? (
                   <div className="flex flex-wrap gap-2">
                     <Button
                       size="sm"
@@ -760,9 +1280,27 @@ export function KitchenBoard({
                       {t.cancel}
                     </Button>
                   </div>
+                ) : isKitchenInProgress(call) ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary">{t.acknowledge}</Badge>
+                    <Button
+                      size="sm"
+                      className="min-w-0 flex-1"
+                      onClick={() => void markReady(call.id)}
+                    >
+                      {t.markReady}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setEditingCall(call)}
+                    >
+                      {t.editOrder}
+                    </Button>
+                  </div>
                 ) : (
                   <div className="flex flex-wrap items-center gap-2">
-                    <p className="text-muted-foreground text-xs">{t.acknowledge}</p>
+                    <Badge>{t.kitchenOrderReady}</Badge>
                     <Button
                       size="sm"
                       variant="outline"
@@ -773,7 +1311,8 @@ export function KitchenBoard({
                   </div>
                 )}
               </article>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>

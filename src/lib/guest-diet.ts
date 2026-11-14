@@ -51,7 +51,7 @@ export function inferDietFromText(text: string, current = emptyDietFilter()) {
   const blob = text.trim();
   if (!blob) return next;
 
-  if (/vegan|ვეგან|веган/i.test(blob)) {
+  if (/vegan|ვეგან|веган|სამარხვ|მარხვ|fasting|постн|постан/i.test(blob)) {
     next.vegan = true;
     next.vegetarian = true;
   }
@@ -86,13 +86,21 @@ function allergenBlocked(blob: string, blocked: string[]) {
   ) {
     return true;
   }
+  if (
+    blocked.includes("dairy") &&
+    /ყველ|სულგუნ|რძ|ხაჭაპურ|matsoni|nadughi|elarji|dairy|cheese|sulguni|yogurt|cream|масло|сыр|молоч/.test(
+      blob,
+    )
+  ) {
+    return true;
+  }
   return false;
 }
 
 function plantBasedBlocked(blob: string, diet: DietFilter) {
   if (
     (diet.vegan || diet.vegetarian) &&
-    /მწვად|ხინკალ|ქაბაბ|სტეიკ|chashushuli|მწვადი|mtsvadi|pork|beef|lamb|meat|ხორც|говяд|свин|баран/.test(
+    /მწვად|ხინკალ|ქაბაბ|სტეიკ|ჩაშუშულ|შქმერულ|ხარჩო|ჩაქაფულ|ოჯახურ|ჩანახ|ოსტრ|კუპატ|კუბდარ|chashushuli|shkmeruli|kharcho|chakapuli|ojakhuri|chanakhi|ostri|kupati|kubdari|მწვადი|mtsvadi|pork|beef|veal|lamb|chicken|turkey|meat|ხორც|საქონლ|ღორ|ხბო|ცხვრ|ქათამ|ქათმ|ინდაურ|სუკ|ბეკონ|ლორ|говяд|свин|баран|телят|куриц|курин|мяс/.test(
       blob,
     )
   ) {
@@ -100,7 +108,7 @@ function plantBasedBlocked(blob: string, diet: DietFilter) {
   }
   if (
     diet.vegan &&
-    /ყველ|სულგუნ|რძ|კვერცხ|ხაჭაპურ|dairy|cheese|egg|sulguni|matsoni|йогурт|сыр/.test(
+    /ყველ|სულგუნ|რძ|კვერცხ|ხაჭაპურ|ერბო|კარაქ|ნაღებ|ნაყინ|მაწონ|ნადუღ|ელარჯ|გებჟალი|თაფლ|dairy|cheese|egg|butter|cream|ice cream|honey|sulguni|matsoni|nadughi|elarji|йогурт|сыр|масло|сливк|яйц|морожен/.test(
       blob,
     )
   ) {
@@ -108,8 +116,44 @@ function plantBasedBlocked(blob: string, diet: DietFilter) {
   }
   return (
     (diet.vegetarian || diet.vegan) &&
-    /თევზ|კალმახ|fish|trout|shrimp|seafood|рыб/.test(blob)
+    /თევზ|კალმახ|ორაგულ|კრევეტ|მიდი|კალმარ|ზღვის პროდუქტ|fish|trout|salmon|shrimp|mussel|calamari|seafood|рыб|форел|лосос|кревет|миди|кальмар|морепродукт/.test(
+      blob,
+    )
   );
+}
+
+export function dishDietLabels(dish: {
+  name: string;
+  description?: string | null;
+  allergens?: string[] | null;
+  ingredients?: string[] | null;
+  category?: string | null;
+}) {
+  const blob = dishBlob(dish);
+  const isDrink =
+    /ღვინ|საფერავ|რქაწითელ|ქინძმარაულ|კოქტეილ|ჯინ|ლიმონათ|სასმელ|wine|cocktail|lemonade|drink|вино|коктейл|лимонад|напит/.test(
+      blob,
+    );
+  const isFasting = !plantBasedBlocked(blob, {
+    blockedAllergens: [],
+    vegan: true,
+    vegetarian: true,
+  });
+  const isVegetarian = !plantBasedBlocked(blob, {
+    blockedAllergens: [],
+    vegan: false,
+    vegetarian: true,
+  });
+  const tags: string[] = [];
+  if (!isDrink) {
+    if (isFasting) {
+      tags.push("fasting/vegan (სამარხვო / ვეგანური)");
+      tags.push("vegetarian (ვეგეტარიანული)");
+    } else if (isVegetarian) {
+      tags.push("vegetarian (ვეგეტარიანული - შეიცავს რძის ნაწარმს/კვერცხს)");
+    }
+  }
+  return tags;
 }
 
 export function dishMatchesDiet(

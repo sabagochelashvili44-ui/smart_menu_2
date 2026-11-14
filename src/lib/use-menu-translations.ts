@@ -2,6 +2,7 @@
 
 import {
   applyMenuTranslations,
+  hasGeorgianScript,
   loadStoredMenuTranslations,
   needsLiveTranslation,
   staticMenuTranslation,
@@ -9,14 +10,21 @@ import {
 } from "@/lib/menu-copy";
 import { useEffect, useMemo, useState } from "react";
 
-export function useMenuTranslations(locale: MenuLocale, phrases: string[]) {
-  loadStoredMenuTranslations();
+export function useMenuTranslations(
+  locale: MenuLocale,
+  phrases: string[],
+  restaurantId?: string,
+) {
   const [liveMap, setLiveMap] = useState<Record<string, string>>({});
   const [translating, setTranslating] = useState(false);
   const signature = useMemo(
     () => phrases.map((item) => item.trim()).filter(Boolean).join("\n"),
     [phrases],
   );
+
+  useEffect(() => {
+    loadStoredMenuTranslations();
+  }, []);
 
   useEffect(() => {
     setLiveMap({});
@@ -38,7 +46,11 @@ export function useMenuTranslations(locale: MenuLocale, phrases: string[]) {
     void fetch("/api/menu-translate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target: locale, texts: missing }),
+      body: JSON.stringify({
+        target: locale,
+        texts: missing,
+        restaurantId: restaurantId || undefined,
+      }),
     })
       .then(async (res) => {
         const json = (await res.json()) as {
@@ -65,15 +77,17 @@ export function useMenuTranslations(locale: MenuLocale, phrases: string[]) {
     return () => {
       generation.current = false;
     };
-  }, [locale, signature]);
+  }, [locale, restaurantId, signature]);
 
   const translate = useMemo(() => {
     return (text: string) => {
       if (!text) return text;
       if (locale === "ka") return text;
+      const fromDict = staticMenuTranslation(text, locale);
+      if (fromDict) return fromDict;
       const live = liveMap[text] || liveMap[text.trim()];
-      if (live) return live;
-      return staticMenuTranslation(text, locale) || (translating ? "…" : text);
+      if (live && !hasGeorgianScript(live)) return live;
+      return translating ? "…" : text;
     };
   }, [liveMap, locale, translating]);
 

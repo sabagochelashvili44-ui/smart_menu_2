@@ -10,6 +10,7 @@ export function QuantityStepper({
   decreaseLabel = "Decrease quantity",
   increaseLabel = "Increase quantity",
   disabledIncrease = false,
+  disabledDecrease = false,
 }: {
   value: number;
   onDecrease: () => void;
@@ -17,6 +18,7 @@ export function QuantityStepper({
   decreaseLabel?: string;
   increaseLabel?: string;
   disabledIncrease?: boolean;
+  disabledDecrease?: boolean;
 }) {
   return (
     <div className="flex w-full items-center justify-between gap-2 rounded-lg border px-1 py-1">
@@ -25,6 +27,7 @@ export function QuantityStepper({
         size="icon-sm"
         variant="ghost"
         aria-label={decreaseLabel}
+        disabled={disabledDecrease}
         onClick={onDecrease}
       >
         <MinusIcon className="size-4" />

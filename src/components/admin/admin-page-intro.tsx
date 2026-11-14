@@ -8,13 +8,15 @@ export function AdminPageIntro({
   subtitleKey,
 }: {
   titleKey: AdminUiKey;
-  subtitleKey: AdminUiKey;
+  subtitleKey?: AdminUiKey;
 }) {
   const { t } = useAdminLocale();
   return (
-    <div>
+    <div className="print:hidden">
       <h2 className="text-lg font-medium">{t[titleKey]}</h2>
-      <p className="text-muted-foreground text-sm">{t[subtitleKey]}</p>
+      {subtitleKey ? (
+        <p className="text-muted-foreground text-sm">{t[subtitleKey]}</p>
+      ) : null}
     </div>
   );
 }

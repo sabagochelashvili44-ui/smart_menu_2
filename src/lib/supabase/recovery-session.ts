@@ -49,7 +49,7 @@ async function sessionFromOtp(supabase: BrowserSupabase, query: URLSearchParams)
     return null;
   }
   const { error } = await supabase.auth.verifyOtp({
-    type: "recovery",
+    type: otpType,
     token_hash: tokenHash,
   });
   clearAuthParamsFromUrl();

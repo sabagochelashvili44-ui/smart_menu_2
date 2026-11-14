@@ -1,25 +1,23 @@
 import { toShiftNote } from "@/lib/shift-notes";
+import {
+  insertShiftNote,
+  selectShiftNotes,
+} from "@/lib/shift-notes-query";
 import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
 import { requireTenantApi } from "@/lib/tenant";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-const SELECT =
-  "id, restaurant_id, title, body, author_email, author_role, created_at, is_active";
-
 export async function GET() {
   const tenant = await requireTenantApi();
   if (!tenant.ok) return tenant.response;
 
   const supabase = createSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("shift_notes")
-    .select(SELECT)
-    .eq("restaurant_id", tenant.restaurant.id)
-    .eq("is_active", true)
-    .order("created_at", { ascending: false })
-    .limit(40);
+  const { data, error } = await selectShiftNotes(
+    supabase,
+    tenant.restaurant.id,
+  );
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -41,7 +39,7 @@ export async function POST(request: Request) {
       content?: string;
     };
     const title = String(body.title ?? "").trim();
-    const content = String(body.body ?? body.content ?? "").trim();
+    const content = String(body.content ?? body.body ?? "").trim();
     if (!content) {
       return NextResponse.json(
         { error: "Note content is required." },
@@ -50,18 +48,15 @@ export async function POST(request: Request) {
     }
 
     const supabase = createSupabaseAdminClient();
-    const { data, error } = await supabase
-      .from("shift_notes")
-      .insert({
-        restaurant_id: tenant.restaurant.id,
-        title: title || content.slice(0, 80),
-        body: content,
-        author_email: String(tenant.user.email ?? "").trim().toLowerCase(),
-        author_role: tenant.staffRole,
-        is_active: true,
-      })
-      .select(SELECT)
-      .single();
+    const authorEmail = String(tenant.user.email ?? "").trim().toLowerCase();
+    const { data, error } = await insertShiftNote(supabase, {
+      restaurant_id: tenant.restaurant.id,
+      title: title || content.slice(0, 80),
+      content,
+      body: content,
+      author_email: authorEmail || undefined,
+      author_role: tenant.staffRole || undefined,
+    });
 
     if (error || !data) {
       return NextResponse.json(

@@ -4,7 +4,13 @@ export const STAFF_ROLES: StaffRole[] = ["owner", "manager", "waiter"];
 
 const ROLE_PATHS: Record<StaffRole, string[]> = {
   waiter: ["/admin/kitchen", "/admin/tables"],
-  manager: ["/admin", "/admin/menu", "/admin/tables", "/admin/kitchen"],
+  manager: [
+    "/admin",
+    "/admin/menu",
+    "/admin/tables",
+    "/admin/kitchen",
+    "/admin/settings",
+  ],
   owner: [
     "/admin",
     "/admin/menu",
@@ -26,6 +32,14 @@ export function normalizeStaffEmail(value: string | null | undefined) {
 
 export function homePathForRole(role: StaffRole | null | undefined) {
   return role === "waiter" ? "/admin/kitchen" : "/admin";
+}
+
+export function canSeeLowRatingAlerts(
+  role: StaffRole | null | undefined,
+  isSuperAdmin = false,
+) {
+  if (isSuperAdmin) return true;
+  return role === "owner" || role === "manager";
 }
 
 function trimTrailingSlashes(value: string) {

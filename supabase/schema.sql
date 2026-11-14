@@ -112,6 +112,8 @@ create table if not exists public.dishes (
   name text not null,
   description text not null default '',
   price numeric(10, 2) not null,
+  bottle_price numeric(10, 2),
+  glass_price numeric(10, 2),
   margin_score integer not null default 5,
   image_url text,
   allergens text[] not null default '{}',

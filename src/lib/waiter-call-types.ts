@@ -1,3 +1,5 @@
+import { isDishSaleItem, isRatingAlertItem } from "@/lib/dish-analytics";
+
 export const WAITER_CALL_TYPES = [
   "call_waiter",
   "clean_table",
@@ -15,6 +17,26 @@ export const GUEST_WAITER_CALL_TYPES = [
   "bill_cash",
 ] as const satisfies readonly WaiterCallType[];
 
+export function isGuestWaiterCallType(
+  value: string | null | undefined,
+): value is (typeof GUEST_WAITER_CALL_TYPES)[number] {
+  return (GUEST_WAITER_CALL_TYPES as readonly string[]).includes(value ?? "");
+}
+
+/** Shown in the guest dock — bills use the feedback dialog instead. */
+export function isGuestProgressCall(type: string | null | undefined) {
+  return type === "call_waiter" || type === "clean_table";
+}
+
+/** Hide leftover calls from a previous party on the same table. */
+export const GUEST_PROGRESS_TICKET_MAX_AGE_MS = 20 * 60 * 1000;
+
+export function isFreshGuestTicket(createdAt: string | null | undefined) {
+  const created = Date.parse(String(createdAt ?? ""));
+  if (!Number.isFinite(created)) return false;
+  return Date.now() - created < GUEST_PROGRESS_TICKET_MAX_AGE_MS;
+}
+
 export function isWaiterCallType(
   value: string | null | undefined,
 ): value is WaiterCallType {
@@ -24,6 +46,78 @@ export function isWaiterCallType(
 export function parseWaiterCallType(value: unknown): WaiterCallType {
   const raw = String(value ?? "").trim();
   return isWaiterCallType(raw) ? raw : "call_waiter";
+}
+
+export function filterLowRatingCalls<T extends { call_type?: string | null }>(
+  calls: T[],
+  canSee: boolean,
+) {
+  if (canSee) return calls;
+  return calls.filter((call) => call.call_type !== "low_rating");
+}
+
+const KITCHEN_ORDER_EXCLUDED_TYPES = new Set([
+  "low_rating",
+  "bill_card",
+  "bill_cash",
+  "clean_table",
+]);
+
+/** Kitchen KDS tickets: food/bar orders only — never reviews or pure floor service. */
+export function isKitchenOrderTicket(call: {
+  call_type?: string | null;
+  items?: Array<{ dish_id?: string | null; name?: string | null }>;
+}) {
+  if (KITCHEN_ORDER_EXCLUDED_TYPES.has(String(call.call_type ?? ""))) {
+    return false;
+  }
+  const items = call.items ?? [];
+  if (items.some((item) => isRatingAlertItem(item))) return false;
+  return items.some((item) => isDishSaleItem(item));
+}
+
+/** Floor service: waiter / bill / clean — no food KDS ticket. */
+export function isFloorServiceTicket(call: {
+  call_type?: string | null;
+  items?: Array<{ dish_id?: string | null; name?: string | null }>;
+}) {
+  const type = String(call.call_type ?? "call_waiter");
+  if (type === "low_rating") return false;
+  if (type === "bill_card" || type === "bill_cash" || type === "clean_table") {
+    return true;
+  }
+  if (type === "call_waiter") return !isKitchenOrderTicket(call);
+  return false;
+}
+
+export function filterKitchenOrderTickets<
+  T extends {
+    call_type?: string | null;
+    items?: Array<{ dish_id?: string | null; name?: string | null }>;
+  },
+>(calls: T[]) {
+  return calls.filter((call) => isKitchenOrderTicket(call));
+}
+
+export function filterFloorServiceTickets<
+  T extends {
+    call_type?: string | null;
+    items?: Array<{ dish_id?: string | null; name?: string | null }>;
+  },
+>(calls: T[]) {
+  return calls.filter((call) => isFloorServiceTicket(call));
+}
+
+/** Orders + floor service for the shared kitchen/waiter board (excludes low_rating). */
+export function filterKitchenBoardTickets<
+  T extends {
+    call_type?: string | null;
+    items?: Array<{ dish_id?: string | null; name?: string | null }>;
+  },
+>(calls: T[]) {
+  return calls.filter(
+    (call) => isKitchenOrderTicket(call) || isFloorServiceTicket(call),
+  );
 }
 
 export const WAITER_CALL_LABELS: Record<

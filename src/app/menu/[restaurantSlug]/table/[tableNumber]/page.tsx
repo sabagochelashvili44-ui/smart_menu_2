@@ -11,7 +11,7 @@ export default async function MenuNamedTablePage({ params }: PageProps) {
   return (
     <GuestMenuView
       restaurantSlug={restaurantSlug}
-      tableId={decodeURIComponent(tableNumber)}
+      tableId={tableNumber}
     />
   );
 }

@@ -5,10 +5,17 @@ import { AdminNav } from "@/components/admin/admin-nav";
 import { SignOutButton } from "@/components/admin/sign-out-button";
 import { Button } from "@/components/ui/button";
 import { exitSuperAdminViewAs } from "@/app/admin/super-admin/actions";
+import { switchActiveTenant } from "@/app/admin/tenant-session";
 import type { StaffRole } from "@/lib/staff-role-shared";
-import { LayoutGrid } from "lucide-react";
-import { usePathname } from "next/navigation";
+import { Building2, LayoutGrid } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
+
+export type AdminRestaurantOption = {
+  id: string;
+  name: string;
+  slug: string | null;
+};
 
 export function AdminShell({
   children,
@@ -17,6 +24,8 @@ export function AdminShell({
   staffRole = null,
   restaurantName = null,
   restaurantLogo = null,
+  activeRestaurantId = null,
+  restaurants = [],
   viewingAsName = null,
 }: {
   children: ReactNode;
@@ -25,14 +34,36 @@ export function AdminShell({
   staffRole?: StaffRole | null;
   restaurantName?: string | null;
   restaurantLogo?: string | null;
+  activeRestaurantId?: string | null;
+  restaurants?: AdminRestaurantOption[];
   viewingAsName?: string | null;
 }) {
   const { t } = useAdminLocale();
   const pathname = usePathname();
+  const router = useRouter();
   const [exitingViewAs, setExitingViewAs] = useState(false);
+  const [switchingTenant, setSwitchingTenant] = useState(false);
   const isSuperAdminPage =
     pathname === "/admin/super-admin" || pathname.startsWith("/admin/super-admin/");
   const useNetworkHeader = isSuperAdminPage;
+  const canSwitchRestaurant = !useNetworkHeader && restaurants.length > 1;
+
+  async function onSwitchRestaurant(nextRestaurantId: string) {
+    if (!nextRestaurantId || nextRestaurantId === activeRestaurantId || switchingTenant) {
+      return;
+    }
+    setSwitchingTenant(true);
+    try {
+      const result = await switchActiveTenant(nextRestaurantId);
+      if (!result.error) {
+        router.refresh();
+        window.location.reload();
+        return;
+      }
+    } finally {
+      setSwitchingTenant(false);
+    }
+  }
 
   async function exitViewAs() {
     if (exitingViewAs) return;
@@ -46,8 +77,8 @@ export function AdminShell({
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-6 p-6">
-      <header className="border-secondary/30 flex items-start justify-between gap-4 border-b pb-4">
+    <div className="mx-auto flex w-full max-w-350 flex-col gap-6 p-6">
+      <header className="border-secondary/30 flex items-start justify-between gap-4 border-b pb-4 print:hidden">
         <div className="flex min-w-0 items-center gap-3">
           {useNetworkHeader ? (
             <span className="bg-muted text-muted-foreground flex size-12 items-center justify-center rounded-full ring-1 ring-foreground/10">
@@ -73,6 +104,25 @@ export function AdminShell({
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          {canSwitchRestaurant ? (
+            <label className="border-input bg-background inline-flex h-9 items-center gap-2 rounded-lg border px-2.5 text-sm shadow-xs">
+              <Building2 className="text-muted-foreground size-4 shrink-0" aria-hidden />
+              <span className="sr-only">{t.switchRestaurant}</span>
+              <select
+                aria-label={t.switchRestaurant}
+                value={activeRestaurantId ?? restaurants[0]?.id ?? ""}
+                disabled={switchingTenant}
+                onChange={(e) => void onSwitchRestaurant(e.target.value)}
+                className="bg-transparent pr-1 text-sm font-medium outline-none"
+              >
+                {restaurants.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <AdminLanguageSwitcher />
           <SignOutButton />
         </div>

@@ -1,12 +1,36 @@
 import { adminUi, engineeringRoleLabel, type AdminLocale } from "@/lib/admin-i18n";
+import { recordGeminiUsage, type AiUsageFeature } from "@/lib/ai-usage";
+import type { AnalyticsInsights } from "@/lib/ai/analytics-shared";
+import { isDishSaleItem, isRatingAlertCall } from "@/lib/dish-analytics";
 import { dishLabel } from "@/lib/menu-copy";
 import { isTimestampInRange } from "@/lib/restaurant-day";
+import {
+  filterConfirmedSales,
+  isAcknowledgedCall,
+  isCancelledCall,
+  isOpenSaleTicket,
+  isPendingCall,
+  isSaleCandidate,
+  splitCallRevenue,
+} from "@/lib/sales-metrics";
+
+export {
+  isEmptySalesMetrics,
+  placeholderInsights,
+  type AnalyticsInsights,
+} from "@/lib/ai/analytics-shared";
+export {
+  isAcknowledgedCall,
+  isCancelledCall,
+  isPendingCall,
+} from "@/lib/sales-metrics";
 
 export type AnalyticsLine = {
   dish_id: string;
   name: string;
   quantity: number;
   unit_price: number;
+  note?: string;
 };
 
 export type AnalyticsTicket = {
@@ -26,16 +50,24 @@ export type AnalyticsDish = {
 };
 
 export type AnalyticsReview = {
+  id?: string;
   rating: number;
   feedback: string;
+  table_id?: string;
+  table_number?: string;
+  created_at?: string;
 };
 
 export type IntentEvent = {
   dish_id: string;
   dish_name: string;
+  category_id?: string;
   event_type: string;
   quantity: number;
   unit_price?: number;
+  duration_ms?: number;
+  table_id?: string;
+  session_id?: string;
   created_at?: string;
 };
 
@@ -43,34 +75,23 @@ export type WaiterCallMetric = {
   id?: string;
   table_id?: string;
   table_number?: string;
+  call_type?: string | null;
   items: AnalyticsLine[];
   status: string;
   created_at?: string;
   acknowledged_at?: string | null;
+  acknowledged_by?: string | null;
+  acknowledged_by_email?: string | null;
+  ready_at?: string | null;
 };
 
-/** Kitchen "მიღებული გამოძახებები" — the only source of confirmed sales. */
-export function isAcknowledgedCall(status: string) {
-  return status === "acknowledged" || status === "completed";
-}
-
-export function isCancelledCall(status: string) {
-  return status === "cancelled";
-}
-
-export function isPendingCall(status: string) {
-  return status === "open" || status === "pending";
-}
-
-function callRevenue(items: AnalyticsLine[]) {
-  return items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
-}
 
 function recordSold(
   sold: Record<string, { qty: number; revenue: number; name: string }>,
   items: AnalyticsLine[],
 ) {
   for (const item of items) {
+    if (!isDishSaleItem(item)) continue;
     const key = dishKey(item.dish_id, item.name);
     const current = sold[key] ?? { qty: 0, revenue: 0, name: item.name };
     current.qty += item.quantity;
@@ -84,6 +105,7 @@ function recordCombos(combos: Record<string, number>, items: AnalyticsLine[]) {
   const names = [
     ...new Set(
       items
+        .filter((item) => isDishSaleItem(item))
         .map((item) => item.dish_id || item.name)
         .filter((name): name is string => Boolean(name)),
     ),
@@ -110,11 +132,13 @@ export function parseAnalyticsItems(raw: unknown): AnalyticsLine[] {
   return raw
     .map((item) => {
       const row = item as Record<string, unknown>;
+      const note = String(row.note ?? "").trim().slice(0, 200);
       return {
         dish_id: String(row.dish_id ?? ""),
         name: String(row.name ?? "Item"),
         quantity: Number(row.quantity) || 0,
         unit_price: Number(row.unit_price) || 0,
+        ...(note ? { note } : {}),
       };
     })
     .filter((item) => item.quantity > 0);
@@ -131,40 +155,39 @@ function estimatedProfit(revenue: number, marginScore: number) {
 function tallyCompletedCalls(calls: WaiterCallMetric[]) {
   const sold: Record<string, { qty: number; revenue: number; name: string }> = {};
   const combos: Record<string, number> = {};
+  const sales = filterConfirmedSales(calls);
   let revenue = 0;
-  let orderCount = 0;
-  let acknowledgedCallCount = 0;
-  let pendingCallCount = 0;
-  let cancelledCallCount = 0;
+  let revenueDishes = 0;
+  let revenueFee = 0;
 
-  for (const call of calls) {
-    const status = call.status ?? "";
-    if (isPendingCall(status)) {
-      pendingCallCount += 1;
-      continue;
-    }
-    if (isCancelledCall(status)) {
-      cancelledCallCount += 1;
-      continue;
-    }
-    if (!isAcknowledgedCall(status)) continue;
-    acknowledgedCallCount += 1;
+  for (const call of sales) {
     const items = call.items ?? [];
-    const amount = callRevenue(items);
-    if (items.length === 0 && amount <= 0) continue;
-    orderCount += 1;
-    revenue += amount;
+    const split = splitCallRevenue(items);
+    revenue += split.total;
+    revenueDishes += split.dishes;
+    revenueFee += split.fee;
     recordCombos(combos, items);
     recordSold(sold, items);
   }
+
+  const pendingCallCount = calls.filter(
+    (call) => isPendingCall(call.status) && !isRatingAlertCall(call),
+  ).length;
+  const pendingSaleTickets = calls.filter((call) => isOpenSaleTicket(call)).length;
+  const cancelledCallCount = calls.filter(
+    (call) => isCancelledCall(call.status) && isSaleCandidate(call),
+  ).length;
 
   return {
     sold,
     combos,
     revenue,
-    orderCount,
-    acknowledgedCallCount,
+    revenueDishes,
+    revenueFee,
+    orderCount: sales.length,
+    acknowledgedCallCount: sales.length,
     pendingCallCount,
+    pendingSaleTickets,
     cancelledCallCount,
   };
 }
@@ -174,12 +197,18 @@ function tallyIntent(events: IntentEvent[]) {
   const cartAdds: Record<string, { qty: number; name: string }> = {};
   for (const event of events) {
     const key = dishKey(event.dish_id, event.dish_name);
-    if (event.event_type === "view") {
+    if (event.event_type === "view" || event.event_type === "dish_dwell") {
       views[key] = (views[key] ?? 0) + Math.max(1, event.quantity);
     }
     if (event.event_type === "cart_add") {
       const current = cartAdds[key] ?? { qty: 0, name: event.dish_name };
       current.qty += Math.max(1, event.quantity);
+      if (event.dish_name) current.name = event.dish_name;
+      cartAdds[key] = current;
+    }
+    if (event.event_type === "cart_remove") {
+      const current = cartAdds[key] ?? { qty: 0, name: event.dish_name };
+      current.qty = Math.max(0, current.qty - Math.max(1, event.quantity));
       if (event.dish_name) current.name = event.dish_name;
       cartAdds[key] = current;
     }
@@ -249,7 +278,10 @@ export function computeAnalytics(input: {
     orderCount,
     acknowledgedCallCount,
     pendingCallCount,
+    pendingSaleTickets,
     cancelledCallCount,
+    revenueDishes,
+    revenueFee,
   } = tallyCompletedCalls(calls);
   const completedRevenue = revenue;
   const completedOrderCount = orderCount;
@@ -257,8 +289,9 @@ export function computeAnalytics(input: {
 
   const waiterShown: Record<string, { qty: number; name: string }> = {};
   for (const call of input.waiterCalls ?? []) {
-    if (isAcknowledgedCall(call.status)) continue;
+    if (isAcknowledgedCall(call.status) || isRatingAlertCall(call)) continue;
     for (const item of call.items) {
+      if (!isDishSaleItem(item)) continue;
       const key = dishKey(item.dish_id, item.name);
       const current = waiterShown[key] ?? { qty: 0, name: item.name };
       current.qty += item.quantity;
@@ -313,6 +346,7 @@ export function computeAnalytics(input: {
   const seenPopular = new Set(popularDishes.map((row) => row.id));
   for (const [key, stats] of Object.entries(sold)) {
     if (stats.qty <= 0 || seenPopular.has(key)) continue;
+    if (!isDishSaleItem({ dish_id: key, name: stats.name })) continue;
     if (popularDishes.some((row) => row.name === stats.name)) continue;
     popularDishes.push({
       id: key,
@@ -394,15 +428,15 @@ export function computeAnalytics(input: {
 
   const aov = orderCount > 0 ? revenue / orderCount : 0;
   const estimatedProfitTotal = engineering.reduce((sum, row) => sum + row.profit, 0);
-  const abandonedCallCount = pendingCallCount + cancelledCallCount;
-  const conversionDenom = acknowledgedCallCount + abandonedCallCount;
+  const abandonedCallCount = pendingSaleTickets + cancelledCallCount;
+  const conversionDenom = orderCount + pendingSaleTickets;
   const orderConversionRate =
-    conversionDenom > 0
-      ? Number((acknowledgedCallCount / conversionDenom).toFixed(3))
-      : 0;
+    conversionDenom > 0 ? Number((orderCount / conversionDenom).toFixed(3)) : 0;
 
   return {
     revenue,
+    revenueDishes,
+    revenueFee,
     orderCount,
     completedRevenue,
     completedOrderCount,
@@ -452,7 +486,7 @@ export function computeTableFloor(
 
   for (const call of calls) {
     const tableId = call.table_id;
-    if (!tableId) continue;
+    if (!tableId || isRatingAlertCall(call)) continue;
     if (isPendingCall(call.status)) {
       calling.add(tableId);
     }
@@ -478,123 +512,105 @@ export function computeTableFloor(
     }));
 }
 
-export function isEmptySalesMetrics(snapshot: {
-  revenue?: number;
-  orderCount?: number;
+async function generateAiCompletion(options: {
+  system: string;
+  user: string;
+  temperature: number;
+  jsonMode?: boolean;
+  restaurantId?: string;
+  feature?: AiUsageFeature;
 }) {
-  return !(Number(snapshot.revenue) > 0 || Number(snapshot.orderCount) > 0);
-}
-
-export function placeholderInsights(text: string): AnalyticsInsights {
-  return {
-    weeklyFinance: text,
-    menuOptimization: text,
-    cartAbandonment: text,
-    nextWeekActions: text,
-    marginGrowth: text,
-    behavioralInsights: text,
-    operationalRisk: text,
-    menuEngineering: text,
-    wastePrevention: text,
-    marginUpsell: text,
-  };
-}
-
-async function fetchOpenAi(
-  body: Record<string, unknown>,
-  apiKey: string,
-) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
-  try {
-    const openaiResponse = await fetch(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      },
-    );
-    if (!openaiResponse.ok) {
-      const detail = await openaiResponse.text();
-      throw new Error(detail || "OpenAI request failed");
-    }
-    return (await openaiResponse.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("OpenAI request timed out");
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
+  const geminiKey =
+    process.env.GEMINI_API_KEY?.trim() || process.env.GOOGLE_API_KEY?.trim();
+  if (!geminiKey) {
+    throw new Error("GEMINI_API_KEY is missing.");
   }
+
+  const { GoogleGenAI } = await import("@google/genai");
+  const ai = new GoogleGenAI({ apiKey: geminiKey });
+  for (const model of [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+  ]) {
+    try {
+      const res = await ai.models.generateContent({
+        model,
+        contents: options.user,
+        config: {
+          systemInstruction: options.system,
+          temperature: options.temperature,
+          ...(options.jsonMode
+            ? { responseMimeType: "application/json" }
+            : {}),
+        },
+      });
+      const text = res.text?.trim() ?? "";
+      if (text) {
+        if (options.feature) {
+          await recordGeminiUsage({
+            restaurantId: options.restaurantId,
+            feature: options.feature,
+            model,
+            response: res,
+          });
+        }
+        return text;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error("GEMINI_API_KEY request failed.");
 }
 
 export async function generateDailyDigest(
-  snapshot: AnalyticsSnapshot,
+  snapshot: {
+    revenue: number;
+    orderCount: number;
+    waiterCallCount?: number;
+    popularDishes: { name: string; qty: number }[];
+    hoursLabel?: string;
+    lane?: "food" | "bar";
+    hourly?: { label: string; orders: number; isPeak?: boolean }[];
+    categories?: { category: string; percent: number; revenue: number }[];
+  },
   locale: AdminLocale,
+  restaurantId?: string,
 ): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error("OPENAI_API_KEY is not set on the server.");
-  }
-
   const language = insightLanguage(locale);
   const top = snapshot.popularDishes.slice(0, 3).map((row) => ({
     name: dishLabel(row.name, locale),
     qty: row.qty,
   }));
-  const system = `You are the lunch-service floor manager of Georgian House.
+  const peaks = (snapshot.hourly ?? [])
+    .filter((row) => row.isPeak)
+    .map((row) => row.label);
+  const system = `You are the Chef Assistant of Georgian House.
 ${language.instruction}
-Write EXACTLY two short sentences of operational advice for TODAY only.
-Use only the provided today's acknowledged sales. Do not mention weekly trends.
+Write ONE or TWO short sentences of sales advice for THIS service window only (${snapshot.hoursLabel || "opening to closing today"}).
+Use only the provided opening-to-closing numbers from the live database. Do not mention other days, weeks, or history.
+Give a concrete tip that can increase sales now (push a top seller, fill a quiet hour, or pair a lagging category).
+Lane: ${snapshot.lane === "bar" ? "bar / drinks" : "dishes and desserts"}.
 No greeting. No bullet list. Plain text only.`;
 
-  const json = await fetchOpenAi(
-    {
-      model: "gpt-4o",
-      temperature: 0.35,
-      messages: [
-        { role: "system", content: system },
-        {
-          role: "user",
-          content: JSON.stringify({
-            todayRevenueGel: Number(snapshot.revenue.toFixed(2)),
-            todayOrders: snapshot.orderCount,
-            todayCalls: snapshot.waiterCallCount,
-            topDishes: top,
-          }),
-        },
-      ],
-    },
-    apiKey,
-  );
-
-  const text = json.choices?.[0]?.message?.content?.trim() ?? "";
-  if (!text) {
-    throw new Error("OpenAI returned an empty digest");
-  }
-  return text;
+  return generateAiCompletion({
+    system,
+    user: JSON.stringify({
+      serviceWindow: snapshot.hoursLabel || "today opening-to-closing",
+      todayRevenueGel: Number(snapshot.revenue.toFixed(2)),
+      todayOrders: snapshot.orderCount,
+      todayCalls: snapshot.waiterCallCount ?? snapshot.orderCount,
+      topSellers: top,
+      peakHours: peaks,
+      categoryShare: (snapshot.categories ?? []).slice(0, 5),
+    }),
+    temperature: 0.35,
+    restaurantId,
+    feature: "digest",
+  });
 }
-
-export type AnalyticsInsights = {
-  weeklyFinance: string;
-  menuOptimization: string;
-  cartAbandonment: string;
-  nextWeekActions: string;
-  marginGrowth: string;
-  behavioralInsights: string;
-  operationalRisk: string;
-  menuEngineering: string;
-  wastePrevention: string;
-  marginUpsell: string;
-};
 
 function extractJsonObject(text: string) {
   const start = text.indexOf("{");
@@ -650,12 +666,8 @@ export async function generateAnalyticsInsights(
     };
   },
   locale: AdminLocale,
+  restaurantId?: string,
 ): Promise<AnalyticsInsights> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error("OPENAI_API_KEY is not set on the server.");
-  }
-
   const language = insightLanguage(locale);
   const copy = adminUi[locale];
   const sales = snapshot.engineering.map((row) => ({
@@ -699,8 +711,8 @@ export async function generateAnalyticsInsights(
 The admin UI language is ${locale} (${language.name}).
 ${language.instruction}
 
-DATASET: The selected reporting window is ${windowLabel} (${windowDays} day(s); created_at from ${snapshot.windowFrom ?? "start"} through ${snapshot.windowTo ?? "end"}). Aggregate peak hours, trends, and AOV across THIS entire window — not a hardcoded 7-day slice unless that is the selected range.
-SALES TRUTH: ₾ revenue, AOV, popularity, and profit proxies come ONLY from waiter_calls.status = acknowledged in that window.
+DATASET: The selected reporting window is ${windowLabel} (${windowDays} day(s); kitchen acknowledgement from ${snapshot.windowFrom ?? "start"} through ${snapshot.windowTo ?? "end"}). Aggregate peak hours, trends, and AOV across THIS entire window — not a hardcoded 7-day slice unless that is the selected range.
+SALES TRUTH: ₾ revenue, AOV, popularity, and profit proxies come ONLY from kitchen-acknowledged waiter_calls with dish items in that window (one dining check per table; later bills on the same table are not a second sale). Revenue includes the service fee; category and profit figures are dish-only. Conversion is confirmed sales ÷ (confirmed sales + still-open sale tickets). Estimated profit is a 0–12 margin heuristic, not bookkeeping.
 Cart views, cart_add events, and pending/cancelled calls are INTENT / abandonment — never add them to confirmed revenue.
 QUOTE the provided numbers. Do not invent dishes, prices, or percentages. If a figure is 0, say so. No generic restaurant clichés.
 
@@ -747,20 +759,14 @@ Reply ONLY with JSON (English keys; values entirely in ${language.name}):
     dishes: sales,
   });
 
-  const json = await fetchOpenAi(
-    {
-      model: "gpt-4o",
-      temperature: 0.3,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-    },
-    apiKey,
-  );
-
-  const raw = json.choices?.[0]?.message?.content?.trim() || "{}";
+  const raw = await generateAiCompletion({
+    system,
+    user,
+    temperature: 0.3,
+    jsonMode: true,
+    restaurantId,
+    feature: "analytics",
+  });
   const parsed = JSON.parse(extractJsonObject(raw)) as Record<string, unknown>;
 
   const weeklyFinance = String(
