@@ -15,19 +15,27 @@ import {
   loadWaiterRestaurant,
 } from "@/lib/ai-waiter-menu";
 import {
+  buildLocalChefCategoryReply,
   buildLocalChefFactReply,
+  buildLocalChefPairingReply,
   buildLocalChefRecommendReply,
+  hasPairingIntent,
   matchNamedDishForFact,
+  resolvePairingSubject,
 } from "@/lib/chef-local-facts";
 import {
   routeChefModel,
   isAcceptableChefReply,
+  ensureChefDishIdsTrailer,
   scrubChefInstructionLeak,
 } from "@/lib/chat-suggestions";
 import { enrichDishesWithPopularity } from "@/lib/dish-popularity";
+import { enforceCuratedPairingsInChefReply } from "@/lib/recommendations";
 import {
   CHEF_SLOW_RESPONSE_MS,
   hashChefMenuCache,
+  peekGeminiMenuCache,
+  shouldCreateGeminiMenuCache,
   warmGeminiMenuCache,
 } from "@/lib/gemini-menu-cache";
 import { ui } from "@/lib/menu-copy";
@@ -213,6 +221,7 @@ type GeminiConfig = {
   cachedContent?: string;
   temperature: number;
   maxOutputTokens: number;
+  thinkingConfig?: { thinkingBudget?: number };
   automaticContinuation?: boolean;
   abortSignal?: AbortSignal;
   httpOptions?: {
@@ -240,25 +249,24 @@ type GeminiModels = {
 };
 
 function fallbackModelsFor(primary: string) {
-  // After an incomplete flash reply, prefer lite for a fast complete answer.
-  if (primary === FLASH_MODEL || primary === FLASH_FALLBACK_MODEL) {
-    return [
-      LITE_MODEL,
-      primary === FLASH_MODEL ? FLASH_FALLBACK_MODEL : FLASH_MODEL,
-    ];
+  // Cross-model fallback only for hard API failures — never for missing DISH_IDS.
+  if (primary === LITE_MODEL) {
+    return [FLASH_MODEL, FLASH_FALLBACK_MODEL];
   }
-  return [FLASH_MODEL, FLASH_FALLBACK_MODEL];
+  if (primary === FLASH_MODEL) return [FLASH_FALLBACK_MODEL];
+  if (primary === FLASH_FALLBACK_MODEL) return [FLASH_MODEL];
+  return [LITE_MODEL, FLASH_MODEL];
 }
 
 function maxOutputTokensForRoute(route: "flash" | "lite") {
-  // Keep enough room for Georgian prose + DISH_IDS; too-low caps cause
-  // incomplete replies and slow model fallbacks.
-  return route === "lite" ? 360 : 768;
+  // Headroom so short replies finish with DISH_IDS (avoids dual Flash→Lite bills).
+  return route === "lite" ? 1024 : 1280;
 }
 
 function finalizeChefReply(raw: string) {
-  if (!isAcceptableChefReply(raw)) return null;
-  return scrubChefInstructionLeak(raw);
+  const withIds = ensureChefDishIdsTrailer(raw);
+  if (!isAcceptableChefReply(withIds)) return null;
+  return scrubChefInstructionLeak(withIds);
 }
 
 async function* streamModel(
@@ -273,6 +281,8 @@ async function* streamModel(
   const config: GeminiConfig = {
     temperature: 0.2,
     maxOutputTokens,
+    // Thinking tokens inflate billed completion — keep budget at 0 for chat.
+    thinkingConfig: { thinkingBudget: 0 },
     automaticContinuation: true,
     abortSignal: signal,
     httpOptions: {
@@ -281,6 +291,8 @@ async function* streamModel(
     },
   };
   if (cachedContent) {
+    // Gemini rejects cachedContent + system_instruction / tools on the same
+    // generate call (400 INVALID_ARGUMENT). Turn FULL cards must live in contents.
     config.cachedContent = cachedContent;
   } else {
     config.systemInstruction = systemInstruction;
@@ -376,7 +388,17 @@ async function completeChefReply(
     assembled = await runModel(primaryModel, Boolean(cachedContent), true);
     const ok = finalizeChefReply(assembled);
     if (ok) return { text: ok, model: primaryModel };
+    // Incomplete/leaky after DISH_IDS recovery: one same-model uncached retry,
+    // then accept recovered prose — do NOT cross-bill Lite/Flash.
+    if (cachedContent) {
+      assembled = await runModel(primaryModel, false, false);
+      const uncachedOk = finalizeChefReply(assembled);
+      if (uncachedOk) return { text: uncachedOk, model: primaryModel };
+    }
+    const forced = finalizeChefReply(ensureChefDishIdsTrailer(assembled));
+    if (forced) return { text: forced, model: primaryModel };
     lastError = new Error("gemini reply incomplete");
+    throw lastError;
   } catch (error) {
     lastError = error;
     console.error("Gemini Failure Details:", error);
@@ -385,18 +407,7 @@ async function completeChefReply(
   }
 
   // Retries stay silent on the wire; the final SSE `result` replaces any
-  // partial/leaky first stream in the client.
-  if (cachedContent && !finalizeChefReply(assembled)) {
-    try {
-      assembled = await runModel(primaryModel, false, false);
-      const ok = finalizeChefReply(assembled);
-      if (ok) return { text: ok, model: primaryModel };
-    } catch (uncachedError) {
-      lastError = uncachedError;
-      console.error("Gemini Failure Details:", uncachedError);
-    }
-  }
-
+  // partial/leaky first stream in the client. Cross-model only on hard failures.
   for (const model of fallbackModelsFor(primaryModel)) {
     try {
       const fallbackText = await runModel(model, false, false);
@@ -472,6 +483,26 @@ function buildConversationTurns(
     turns.push({ role: "user", parts: [{ text: message }] });
   }
   return turns;
+}
+
+/** When explicit cache holds rules+INDEX, attach turn FULL cards in contents. */
+function withCachedTurnCards(
+  contents: GeminiTurn[],
+  turnPrompt: string,
+): GeminiTurn[] {
+  const block = turnPrompt.trim();
+  if (!block) return contents;
+  const cloned = contents.map((turn) => ({
+    role: turn.role,
+    parts: turn.parts.map((part) => ({ text: part.text })),
+  }));
+  const last = cloned[cloned.length - 1];
+  if (last?.role === "user") {
+    last.parts[0].text = `${block}\n\nGUEST:\n${last.parts[0].text}`;
+    return cloned;
+  }
+  cloned.push({ role: "user", parts: [{ text: `${block}\n\nGUEST:` }] });
+  return cloned;
 }
 
 export async function handleAiWaiterPost(request: Request) {
@@ -577,6 +608,50 @@ export async function handleAiWaiterPost(request: Request) {
             restaurant.percent || ctx.constraints?.serviceFeePercent || 0;
           const restaurantName = restaurant.name || "this restaurant";
 
+          const priorIds = extractHistoryDishIds(ctx.history);
+          // Pairing before facts/Gemini — never stream an invented companion answer.
+          const localPairing = buildLocalChefPairingReply({
+            message: ctx.message,
+            dishes: tagged,
+            locale: ctx.locale,
+            history: ctx.history,
+          });
+          if (localPairing) {
+            const duration_ms = Date.now() - turnStartedAt;
+            logChefTiming({
+              path: "local_recommend",
+              duration_ms,
+              restaurantId: ctx.restaurantId,
+              route: "flash",
+              cached: false,
+            });
+            controller.enqueue(
+              encoder.encode(sseChunk({ text: localPairing })),
+            );
+            controller.enqueue(
+              encoder.encode(
+                sseChunk({
+                  result: localPairing,
+                  done: true,
+                  availableIds,
+                  ...(chefDiagnosticsEnabled()
+                    ? {
+                        meta: {
+                          path: "local_recommend",
+                          duration_ms,
+                          route: "flash",
+                          model: null,
+                          cached: false,
+                          pairing: true,
+                        },
+                      }
+                    : {}),
+                }),
+              ),
+            );
+            return;
+          }
+
           const localFact = buildLocalChefFactReply({
             message: ctx.message,
             dishes: tagged,
@@ -615,8 +690,46 @@ export async function handleAiWaiterPost(request: Request) {
             );
             return;
           }
-
-          const priorIds = extractHistoryDishIds(ctx.history);
+          const localCategory = buildLocalChefCategoryReply({
+            message: ctx.message,
+            dishes: tagged,
+            locale: ctx.locale,
+          });
+          if (localCategory) {
+            const duration_ms = Date.now() - turnStartedAt;
+            logChefTiming({
+              path: "local_recommend",
+              duration_ms,
+              restaurantId: ctx.restaurantId,
+              route: "flash",
+              cached: false,
+            });
+            controller.enqueue(
+              encoder.encode(sseChunk({ text: localCategory })),
+            );
+            controller.enqueue(
+              encoder.encode(
+                sseChunk({
+                  result: localCategory,
+                  done: true,
+                  availableIds,
+                  ...(chefDiagnosticsEnabled()
+                    ? {
+                        meta: {
+                          path: "local_recommend",
+                          duration_ms,
+                          route: "flash",
+                          model: null,
+                          cached: false,
+                          category: true,
+                        },
+                      }
+                    : {}),
+                }),
+              ),
+            );
+            return;
+          }
           const localRecommend = buildLocalChefRecommendReply({
             message: ctx.message,
             dishes: tagged,
@@ -676,10 +789,37 @@ export async function handleAiWaiterPost(request: Request) {
             route === "lite"
               ? matchNamedDishForFact(tagged, ctx.message)
               : null;
-          const focused =
+          const focusedBase =
             factDish != null
               ? [factDish]
               : pickFocusedDishes(tagged, ctx.message, priorIds);
+          // Always keep cart dishes in FULL cards so pairs_with companions are visible.
+          const cartFocusIds = new Set(
+            (ctx.constraints?.cartDishIds ?? [])
+              .map((id) => String(id).trim().toLowerCase())
+              .filter(Boolean),
+          );
+          const focused = (() => {
+            if (!cartFocusIds.size) return focusedBase;
+            const byId = new Map(
+              tagged
+                .filter((dish) => dish.id)
+                .map((dish) => [String(dish.id).toLowerCase(), dish] as const),
+            );
+            const merged = [...focusedBase];
+            const used = new Set(
+              merged
+                .map((dish) => String(dish.id ?? "").toLowerCase())
+                .filter(Boolean),
+            );
+            for (const id of cartFocusIds) {
+              const dish = byId.get(id);
+              if (!dish || used.has(id)) continue;
+              merged.unshift(dish);
+              used.add(id);
+            }
+            return merged;
+          })();
           const dietFromMessage =
             /ვეგეტარ|სამარხვ|მარხვ|vegetarian|vegan|fasting|вегетариан|постн|постан|веган/i.test(
               ctx.message,
@@ -695,6 +835,8 @@ export async function handleAiWaiterPost(request: Request) {
             noAlcohol:
               Boolean(ctx.constraints?.noAlcohol) || dietFromMessage,
           };
+          // Cache rules + INDEX (when included). Lite keeps INDEX off for smaller prompts.
+          const includeIndex = route === "flash";
           const cacheable = buildCacheableChefSystemPrompt(
             restaurantName,
             dishes,
@@ -702,7 +844,7 @@ export async function handleAiWaiterPost(request: Request) {
             {
               hostId,
               serviceFeePercent,
-              includeIndex: route !== "lite",
+              includeIndex,
             },
           );
           const turnPrompt = buildChefTurnPrompt(
@@ -711,25 +853,31 @@ export async function handleAiWaiterPost(request: Request) {
             constraints,
             focused,
             route === "lite"
-              ? { includeCartPairing: false, includeFilters: false }
-              : undefined,
+              ? {
+                  includeCartPairing: false,
+                  includeFilters: false,
+                  guestMessage: ctx.message,
+                }
+              : { guestMessage: ctx.message },
           );
-          // Always put rules + cards in systemInstruction and only the guest
-          // text in the user turn. Stuffing instructions into the user message
-          // made Gemini echo English rules ("Do NOT repeat cart…") and skip
-          // a real Georgian answer. Warm the remote cache in the background
-          // for later turns without blocking this reply.
-          const fullSystem = `${cacheable}\n${turnPrompt}`;
-          if (route === "flash") {
+          const menuHash = hashChefMenuCache({
+            restaurantName,
+            serviceFeePercent,
+            dishes,
+          });
+          const cachedName = peekGeminiMenuCache({
+            restaurantId: ctx.restaurantId,
+            locale: ctx.locale,
+            model: primaryModel,
+            hash: menuHash,
+          });
+          // Warm remote cache in background when large enough; never block reply.
+          if (shouldCreateGeminiMenuCache(cacheable)) {
             warmGeminiMenuCache({
               restaurantId: ctx.restaurantId,
               locale: ctx.locale,
-              model: FLASH_MODEL,
-              hash: hashChefMenuCache({
-                restaurantName,
-                serviceFeePercent,
-                dishes,
-              }),
+              model: primaryModel,
+              hash: menuHash,
               systemInstruction: cacheable,
             });
           }
@@ -737,17 +885,25 @@ export async function handleAiWaiterPost(request: Request) {
             ctx.history,
             ctx.message,
           );
+          // Always keep full system text for uncached retries. When the
+          // generate call uses cachedContent, streamModel omits
+          // system_instruction (Gemini 400 otherwise) and FULL cards ride in
+          // contents via withCachedTurnCards.
+          const systemForGenerate = `${cacheable}\n${turnPrompt}`;
+          const generateContents = cachedName
+            ? withCachedTurnCards(turnContents, turnPrompt)
+            : turnContents;
 
           const completed = await completeChefReply(
-            turnContents,
-            fullSystem,
+            generateContents,
+            systemForGenerate,
             apiKey,
             ctx.restaurantId,
             (delta) => {
               controller.enqueue(encoder.encode(sseChunk({ text: delta })));
             },
             primaryModel,
-            null,
+            cachedName,
             maxOutputTokensForRoute(route),
           );
           const duration_ms = Date.now() - turnStartedAt;
@@ -757,14 +913,62 @@ export async function handleAiWaiterPost(request: Request) {
             restaurantId: ctx.restaurantId,
             route,
             model: completed.model,
-            cached: false,
+            cached: Boolean(cachedName),
           });
           if (!completed.text.trim()) {
             controller.enqueue(
               encoder.encode(sseChunk({ error: GUEST_ERROR })),
             );
           } else {
-            const polished = polishGeorgianGrammar(completed.text);
+            const cartIds = ctx.constraints?.cartDishIds ?? [];
+            const pairingTurn = hasPairingIntent(ctx.message, ctx.history);
+            const pairingSubject = pairingTurn
+              ? resolvePairingSubject(tagged, ctx.message)
+              : null;
+            let replyText = completed.text;
+            if (pairingTurn && pairingSubject) {
+              replyText = enforceCuratedPairingsInChefReply({
+                text: completed.text,
+                cartIds,
+                subjectDishId: String(pairingSubject.id ?? ""),
+                clearWhenEmpty: true,
+                noAlcohol: Boolean(constraints.noAlcohol),
+                dishes: dishes.map((dish) => ({
+                  id: String(dish.id ?? ""),
+                  category_id: "",
+                  name: dish.name,
+                  price: Number(dish.price) || 0,
+                  image_url: null,
+                  is_available: dish.is_available !== false,
+                  description: dish.description,
+                  ingredients: dish.ingredients,
+                  wine_pairing: dish.wine_pairing,
+                  pairing_dish_ids: dish.pairing_dish_ids,
+                  category: dish.category ?? "",
+                })),
+              });
+            } else if (!pairingTurn) {
+              replyText = enforceCuratedPairingsInChefReply({
+                text: completed.text,
+                cartIds,
+                lastAddedId: cartIds[cartIds.length - 1] ?? null,
+                noAlcohol: Boolean(constraints.noAlcohol),
+                dishes: dishes.map((dish) => ({
+                  id: String(dish.id ?? ""),
+                  category_id: "",
+                  name: dish.name,
+                  price: Number(dish.price) || 0,
+                  image_url: null,
+                  is_available: dish.is_available !== false,
+                  description: dish.description,
+                  ingredients: dish.ingredients,
+                  wine_pairing: dish.wine_pairing,
+                  pairing_dish_ids: dish.pairing_dish_ids,
+                  category: dish.category ?? "",
+                })),
+              });
+            }
+            const polished = polishGeorgianGrammar(replyText);
             controller.enqueue(
               encoder.encode(
                 sseChunk({
@@ -778,7 +982,7 @@ export async function handleAiWaiterPost(request: Request) {
                           duration_ms,
                           route,
                           model: completed.model,
-                          cached: false,
+                          cached: Boolean(cachedName),
                           maxOutputTokens: maxOutputTokensForRoute(route),
                         },
                       }

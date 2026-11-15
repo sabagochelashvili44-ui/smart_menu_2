@@ -388,8 +388,8 @@ function pillarCacheSync(menu: AssistantDish[]): ChefQaCheck[] {
     check(
       "cache_sync",
       "ttl-safety",
-      "Gemini cache TTL safety-net is 4h",
-      cacheSrc.includes("GEMINI_MENU_CACHE_TTL_SECONDS = 14_400"),
+      "Gemini cache TTL safety-net is 30m",
+      cacheSrc.includes("GEMINI_MENU_CACHE_TTL_SECONDS = 1_800"),
     ),
   );
 
@@ -512,21 +512,33 @@ function pillarFallback(): ChefQaCheck[] {
   out.push(
     check(
       "fallback",
-      "uncached-generate",
-      "Generate always passes null cachedContent (no stale serve)",
-      /completeChefReply\([\s\S]*?null,\s*maxOutputTokensForRoute/.test(
-        handlerSrc,
-      ),
+      "peek-cached-generate",
+      "Generate peeks menu cache and may pass cachedContent",
+      handlerSrc.includes("peekGeminiMenuCache") &&
+        handlerSrc.includes("cachedName"),
+    ),
+  );
+  out.push(
+    check(
+      "fallback",
+      "cache-no-system-instruction",
+      "Cached generate puts turn cards in contents (no system_instruction with cache)",
+      handlerSrc.includes("withCachedTurnCards") &&
+        handlerSrc.includes(
+          "Gemini rejects cachedContent + system_instruction",
+        ) &&
+        handlerSrc.includes("FULL cards ride in"),
     ),
   );
   out.push(
     check(
       "fallback",
       "model-fallback-chain",
-      "Fallback models include 3.8-flash and lite",
+      "Fallback models include 3.8-flash and lite (hard errors only)",
       handlerSrc.includes("gemini-3.8-flash") &&
         handlerSrc.includes("gemini-3.5-flash-lite") &&
-        handlerSrc.includes("fallbackModelsFor"),
+        handlerSrc.includes("fallbackModelsFor") &&
+        handlerSrc.includes("Cross-model only on hard failures"),
     ),
   );
   out.push(
@@ -564,7 +576,7 @@ function pillarFallback(): ChefQaCheck[] {
       "Cache warm is background-only (does not block reply)",
       handlerSrc.includes("warmGeminiMenuCache") &&
         !handlerSrc.includes("await warmGeminiMenuCache") &&
-        !handlerSrc.includes("peekGeminiMenuCache("),
+        handlerSrc.includes("peekGeminiMenuCache"),
     ),
   );
 
@@ -613,6 +625,19 @@ function pillarFallback(): ChefQaCheck[] {
       isAcceptableChefReply("გირჩევთ საფერავს ხინკალთან.\nDISH_IDS: none"),
     ),
   );
+  out.push(
+    check(
+      "fallback",
+      "accept-complete-en",
+      "Complete English guest prose with DISH_IDS is acceptable",
+      isAcceptableChefReply(
+        "I recommend our Khinkali from the menu with Tarkhuna.\nDISH_IDS: none",
+      ) &&
+        !chefReplyLooksLeaked(
+          "I recommend our Khinkali from the menu with Tarkhuna.",
+        ),
+    ),
+  );
 
   return out;
 }
@@ -647,22 +672,29 @@ function pillarRouting(menu: AssistantDish[]): ChefQaCheck[] {
 
   const flash = [
     "მირჩიე სამარხვო ან ვეგეტარიანული კერძები",
-    "რა ღვინო შევუხამო ხინკალს?",
     "ტოპ 3 ბესტსელერი",
-    "recommend pairing for mtsvadi",
     "სხვა რამე მირჩიე",
+    "recommend something under ₾25 for lunch",
   ];
   for (const [i, message] of flash.entries()) {
     out.push(
       check(
         "routing",
         `flash-${i + 1}`,
-        `Recommend/pairing → flash: ${message}`,
+        `Complex recommend → flash: ${message}`,
         routeChefModel(message) === "flash",
         `route=${routeChefModel(message)}`,
       ),
     );
   }
+  out.push(
+    check(
+      "routing",
+      "lite-default-browse",
+      "Simple browse defaults to lite",
+      routeChefModel("დესერტი რა არის მენიუში?") === "lite",
+    ),
+  );
 
   const handlerSrc = readSrc("src/lib/ai-waiter-handler.ts");
   out.push(
@@ -697,9 +729,10 @@ function pillarRouting(menu: AssistantDish[]): ChefQaCheck[] {
   out.push(
     check(
       "routing",
-      "warm-flash-only",
-      "Background warm only on flash route",
-      /if \(route === "flash"\) \{\s*warmGeminiMenuCache/.test(handlerSrc),
+      "warm-with-guard",
+      "Background warm uses min-size guard for cacheable prompt",
+      handlerSrc.includes("shouldCreateGeminiMenuCache") &&
+        handlerSrc.includes("warmGeminiMenuCache"),
     ),
   );
 
@@ -738,16 +771,16 @@ function pillarLanguage(menu: AssistantDish[]): ChefQaCheck[] {
     check(
       "language",
       "token-cap-lite",
-      "Lite maxOutputTokens = 360",
-      /route === "lite" \? 360 : 768/.test(handlerSrc),
+      "Lite maxOutputTokens = 1024",
+      /route === "lite" \? 1024 : 1280/.test(handlerSrc),
     ),
   );
   out.push(
     check(
       "language",
       "token-cap-flash",
-      "Flash maxOutputTokens = 768",
-      /route === "lite" \? 360 : 768/.test(handlerSrc),
+      "Flash maxOutputTokens = 1280",
+      /route === "lite" \? 1024 : 1280/.test(handlerSrc),
     ),
   );
   out.push(
@@ -802,7 +835,7 @@ function pillarLanguage(menu: AssistantDish[]): ChefQaCheck[] {
       "Turn rules live in system prompt builder (not stuffed as sole user msg)",
       turn.includes("LIVE MENU FULL CARDS") &&
         handlerSrc.includes("buildConversationTurns") &&
-        handlerSrc.includes("fullSystem"),
+        handlerSrc.includes("systemForGenerate"),
     ),
   );
 

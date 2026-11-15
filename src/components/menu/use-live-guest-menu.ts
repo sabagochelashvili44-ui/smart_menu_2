@@ -27,6 +27,9 @@ function asDish(row: Record<string, unknown>): MenuDish | null {
       ? row.ingredients.map((item) => String(item))
       : null,
     wine_pairing: row.wine_pairing ? String(row.wine_pairing) : null,
+    pairing_dish_ids: Array.isArray(row.pairing_dish_ids)
+      ? row.pairing_dish_ids.map((item) => String(item)).filter(Boolean)
+      : null,
     calories: row.calories == null ? null : Number(row.calories) || null,
     protein: row.protein == null ? null : Number(row.protein) || null,
     carbs: row.carbs == null ? null : Number(row.carbs) || null,

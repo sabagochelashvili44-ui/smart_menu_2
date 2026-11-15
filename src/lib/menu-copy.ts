@@ -335,6 +335,10 @@ export const ui = {
       "⚠️ გთხოვთ, თქვენი ალერგიის შესახებ შეკვეთის გაფორმებისას მიმტანსაც გადაუმოწმოთ.",
     pairKhinkali: "ხინკალს განსაკუთრებით უხდება ჩვენი ქვევრის საფერავი!",
     pairWith: (pairing: string) => `შეხამება: ${pairing}`,
+    noOfficialPairing: (dish: string) =>
+      `${dish}-სთვის ცალკე შეხამება ამჟამად არ მაქვს შემოთავაზებული. სხვა კერძი ან სასმელი მკითხეთ — სიამოვნებით დაგეხმარებით.`,
+    officialPairingIntro: (dish: string) =>
+      `${dish}-ს განსაკუთრებით უხდება`,
     dietNote: (label: string) => `გავითვალისწინებ: ${label}.`,
     dietRemovedNote: (label: string) => `ფილტრი მოიხსნა: ${label}.`,
     noCategoryDish: "ჩვენს მენიუში ამ კატეგორიის კერძი ამჟამად არ არის.",
@@ -521,6 +525,10 @@ export const ui = {
       "⚠️ Please also double-check with your waiter regarding any severe allergies when placing your order.",
     pairKhinkali: "Khinkali pairs beautifully with our qvevri Saperavi!",
     pairWith: (pairing: string) => `Pairs with: ${pairing}`,
+    noOfficialPairing: (dish: string) =>
+      `I don't have a set pairing for ${dish} just now. Ask me about another dish or drink from the menu — I'll gladly help.`,
+    officialPairingIntro: (dish: string) =>
+      `${dish} pairs especially well with`,
     dietNote: (label: string) => `Noted: ${label}.`,
     dietRemovedNote: (label: string) => `Filter removed: ${label}.`,
     noCategoryDish: "We do not currently have a dish in that category on our menu.",
@@ -699,6 +707,10 @@ export const ui = {
       "⚠️ Пожалуйста, также уточните информацию об аллергенах у официанта при оформлении заказа.",
     pairKhinkali: "Хинкали прекрасно сочетаются с нашим квеври Саперави!",
     pairWith: (pairing: string) => `К блюду: ${pairing}`,
+    noOfficialPairing: (dish: string) =>
+      `Для «${dish}» у меня пока нет готового сочетания. Спросите о другом блюде или напитке из меню — с удовольствием подскажу.`,
+    officialPairingIntro: (dish: string) =>
+      `К «${dish}» особенно хорошо подойдут`,
     dietNote: (label: string) => `Учту: ${label}.`,
     dietRemovedNote: (label: string) => `Фильтр снят: ${label}.`,
     noCategoryDish: "В нашем меню сейчас нет блюда этой категории.",

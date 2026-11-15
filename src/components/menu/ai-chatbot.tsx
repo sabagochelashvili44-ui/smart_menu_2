@@ -30,6 +30,11 @@ import {
 } from "@/lib/chat-suggestions";
 import type { FlavorCourse } from "@/lib/flavor-pairing";
 import {
+  buildLocalChefPairingReply,
+  hasPairingIntent,
+} from "@/lib/chef-local-facts";
+import {
+  curatedPriorityIdsFromCart,
   fillChefRecommendationCards,
   type RecommendableDish,
 } from "@/lib/recommendations";
@@ -286,6 +291,7 @@ export function AiChatbot({
   onChangeQuantity,
   onRemoveFromCart,
   cartIds = [],
+  lastAddedId = null,
   companionSuggestions = [],
   companionMix,
 }: {
@@ -306,6 +312,7 @@ export function AiChatbot({
   onChangeQuantity?: (dish: ChatDish, delta: number) => void;
   onRemoveFromCart?: (dishId: string) => void;
   cartIds?: string[];
+  lastAddedId?: string | null;
   companionSuggestions?: RecommendableDish[];
   companionMix?: FlavorCourse[];
 }) {
@@ -466,6 +473,46 @@ export function AiChatbot({
     };
 
     try {
+      const asAssistantDishes = dishesRef.current.map((dish) => ({
+        id: dish.id,
+        name: dish.name,
+        name_en: (dish as { name_en?: string | null }).name_en,
+        name_ru: (dish as { name_ru?: string | null }).name_ru,
+        description: dish.description,
+        pairing_dish_ids: dish.pairing_dish_ids,
+        is_available: dish.is_available,
+      }));
+      const pairingTurn = hasPairingIntent(content, apiMessages);
+      // Pairing is 100% local from admin pairing_dish_ids — never call Gemini
+      // (avoids streamed invented Saperavi answers that later flip).
+      if (pairingTurn) {
+        const localPairing =
+          buildLocalChefPairingReply({
+            message: content,
+            dishes: asAssistantDishes,
+            locale,
+            history: apiMessages.slice(0, -1),
+          }) ?? "";
+        const parsedLocal = parseChefReply(localPairing);
+        const spokenLocal = withAllergenNote(
+          parsedLocal.spoken,
+          dietRef.current,
+          content,
+          copy.allergenSafety,
+        );
+        const liveLocal = dishesForLiveStock(dishesRef.current);
+        const cardsLocal = dishesFromIds(parsedLocal.ids, liveLocal);
+        commitMessages([
+          ...next,
+          {
+            role: "assistant",
+            content: spokenLocal || copy.apiError,
+            dishes: cardsLocal,
+          },
+        ]);
+        return;
+      }
+
       const res = await fetch("/api/ai-waiter", {
         method: "POST",
         headers: {
@@ -521,7 +568,28 @@ export function AiChatbot({
               maxPriceRef.current!,
           )
         : rawResolved;
-      const shown = isChefRecommendTurn(content, parsed.ids)
+      const catalogForCards = liveDishes.map((dish) => ({
+        id: dish.id,
+        category_id: dish.category_id ?? "",
+        name: dish.name,
+        price: dish.price,
+        image_url: dish.image_url ?? null,
+        is_available: dish.is_available,
+        description: dish.description,
+        ingredients: dish.ingredients,
+        wine_pairing: dish.wine_pairing,
+        pairing_dish_ids: dish.pairing_dish_ids,
+        pairReason: dish.pairReason,
+        category: dish.category,
+      }));
+      const priorityIds = curatedPriorityIdsFromCart(
+        cartIds,
+        dishesRef.current,
+        { lastAddedId },
+      );
+      const useCuratedCards =
+        priorityIds.length > 0 || isChefRecommendTurn(content, parsed.ids);
+      const shown = useCuratedCards
         ? fillChefRecommendationCards({
             preferred: resolved.map((dish) => ({
               id: dish.id,
@@ -533,11 +601,14 @@ export function AiChatbot({
               description: dish.description,
               ingredients: dish.ingredients,
               wine_pairing: dish.wine_pairing,
+              pairing_dish_ids: dish.pairing_dish_ids,
               pairReason: dish.pairReason,
               category: dish.category,
             })),
             companions: companionSuggestions,
             mix: companionMix ?? ["dish", "dish", "dish"],
+            priorityIds,
+            catalogDishes: catalogForCards,
           }).map((item) => {
             const live = liveDishes.find((dish) => dish.id === item.id);
             return live

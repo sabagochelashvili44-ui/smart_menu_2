@@ -49,6 +49,7 @@ export type Dish = {
   ingredients: string[];
   is_available: boolean;
   wine_pairing: string;
+  pairing_dish_ids?: string[];
   calories?: number | null;
   protein?: number | null;
   carbs?: number | null;

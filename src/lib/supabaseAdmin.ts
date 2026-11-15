@@ -95,6 +95,8 @@ export type AdminDish = {
   name_ru?: string | null;
   description_en?: string | null;
   description_ru?: string | null;
+  /** Curated companion dish/drink ids from the same restaurant menu. */
+  pairing_dish_ids?: string[];
   recipe?: AdminRecipeLine[];
 };
 

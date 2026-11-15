@@ -32,7 +32,7 @@ where table_schema = 'public'
   and column_name in (
     'name_en','name_ru','description_en','description_ru',
     'calories','protein','carbs','fat','prep_minutes',
-    'bottle_price','glass_price'
+    'bottle_price','glass_price','pairing_dish_ids'
   )
 order by 1;
 

@@ -39,6 +39,7 @@ type DishRow = {
   is_available: boolean;
   ingredients?: string[] | null;
   wine_pairing?: string | null;
+  pairing_dish_ids?: string[] | null;
   calories?: number | null;
   protein?: number | null;
   carbs?: number | null;
@@ -55,20 +56,36 @@ export type GuestMenuRestaurant = RestaurantBrandFields & {
 };
 
 const DISH_SELECT_FULL_BASE =
-  "id, category_id, name, description, price, bottle_price, glass_price, image_url, allergens, is_available, ingredients, wine_pairing, calories, protein, carbs, fat, prep_minutes";
+  "id, category_id, name, description, price, bottle_price, glass_price, image_url, allergens, is_available, ingredients, wine_pairing, pairing_dish_ids, calories, protein, carbs, fat, prep_minutes";
 const DISH_SELECT_NUTRITION_BASE =
-  "id, category_id, name, description, price, image_url, allergens, is_available, ingredients, calories, protein, carbs, fat";
+  "id, category_id, name, description, price, image_url, allergens, is_available, ingredients, pairing_dish_ids, calories, protein, carbs, fat";
 const DISH_SELECT_NUTRITION_CORE_BASE =
   "id, category_id, name, description, price, image_url, allergens, is_available, calories, protein, carbs, fat";
 const DISH_SELECT_MENU_BASE =
-  "id, category_id, name, description, price, image_url, allergens, is_available, ingredients, wine_pairing";
+  "id, category_id, name, description, price, image_url, allergens, is_available, ingredients, wine_pairing, pairing_dish_ids";
 const DISH_SELECT_CORE_BASE =
   "id, category_id, name, description, price, image_url, allergens, is_available";
 const DISH_I18N = ", name_en, name_ru, description_en, description_ru";
 const I18N_COLUMN_ERROR = /name_en|name_ru|description_en|description_ru/;
+const PAIRING_COLUMN_ERROR = /pairing_dish_ids/;
+const DISH_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function asTextList(value: unknown): string[] | null {
   return normalizeMenuTextList(value);
+}
+
+function asPairingIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const id = String(item ?? "").trim();
+    if (!DISH_UUID_RE.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
 }
 
 function mapGuestDish(row: Record<string, unknown>): DishRow {
@@ -85,6 +102,7 @@ function mapGuestDish(row: Record<string, unknown>): DishRow {
     is_available: row.is_available !== false,
     ingredients: asTextList(row.ingredients),
     wine_pairing: row.wine_pairing ? String(row.wine_pairing) : null,
+    pairing_dish_ids: asPairingIds(row.pairing_dish_ids),
     calories: parseNutritionInput(row.calories ?? row.kcal),
     protein: parseNutritionInput(row.protein ?? row.proteins),
     carbs: parseNutritionInput(row.carbs ?? row.carbohydrates),
@@ -198,10 +216,16 @@ async function fetchRestaurantDishes(
 ) {
   const chain = [
     DISH_SELECT_FULL_BASE,
+    DISH_SELECT_FULL_BASE.replace(", pairing_dish_ids", ""),
     DISH_SELECT_FULL_BASE.replace(", bottle_price, glass_price", ""),
+    DISH_SELECT_FULL_BASE
+      .replace(", bottle_price, glass_price", "")
+      .replace(", pairing_dish_ids", ""),
     DISH_SELECT_NUTRITION_BASE,
+    DISH_SELECT_NUTRITION_BASE.replace(", pairing_dish_ids", ""),
     DISH_SELECT_NUTRITION_CORE_BASE,
     DISH_SELECT_MENU_BASE,
+    DISH_SELECT_MENU_BASE.replace(", pairing_dish_ids", ""),
     DISH_SELECT_CORE_BASE,
   ];
   const suffixes = [DISH_I18N, ""];

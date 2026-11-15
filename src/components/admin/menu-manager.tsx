@@ -38,7 +38,7 @@ import {
   parseMoney,
   type MenuLane,
 } from "@/lib/menu-lane";
-import { ImagePlus, Loader2 } from "lucide-react";
+import { ImagePlus, Loader2, Search, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 
@@ -71,6 +71,7 @@ type DishDraft = {
   carbs: string;
   fat: string;
   is_available: boolean;
+  pairing_dish_ids: string[];
   recipe: RecipeDraftLine[];
 };
 
@@ -105,6 +106,7 @@ function emptyDraft(categoryId: string): DishDraft {
     carbs: "",
     fat: "",
     is_available: true,
+    pairing_dish_ids: [],
     recipe: [],
   };
 }
@@ -147,6 +149,8 @@ export function MenuManager({
   const [uploadingImage, setUploadingImage] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [pairingSearch, setPairingSearch] = useState("");
+  const [pairingCategoryId, setPairingCategoryId] = useState<string>("all");
 
   useEffect(() => {
     setItems(dishes);
@@ -179,6 +183,94 @@ export function MenuManager({
   const emptyCategories = grouped
     .filter((group) => group.dishes.length === 0)
     .map((group) => group.category);
+
+  const pairingCandidates = useMemo(() => {
+    const selfId = draft.id;
+    const collator =
+      locale === "ru" ? "ru" : locale === "en" ? "en" : "ka";
+    return items
+      .filter((dish) => dish.id !== selfId)
+      .map((dish) => {
+        const category = categoryRows.find((row) => row.id === dish.category_id);
+        const bar = category ? isBarCategory(category) : false;
+        const label = dishLabel(dish.name, locale);
+        return {
+          dish,
+          bar,
+          category,
+          label,
+          searchBlob: [
+            label,
+            dish.name,
+            dish.name_en,
+            dish.name_ru,
+            category?.name,
+            category?.name_en,
+            category?.name_ru,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLocaleLowerCase(collator),
+        };
+      })
+      .sort((a, b) => {
+        if (a.bar !== b.bar) return a.bar ? 1 : -1;
+        const catA = categoryNameFromFields(a.category ?? { name: "" }, locale);
+        const catB = categoryNameFromFields(b.category ?? { name: "" }, locale);
+        const byCat = catA.localeCompare(catB, collator);
+        if (byCat !== 0) return byCat;
+        return a.label.localeCompare(b.label, collator);
+      });
+  }, [items, categoryRows, draft.id, locale]);
+
+  const pairingCategoryOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const row of pairingCandidates) {
+      counts.set(row.dish.category_id, (counts.get(row.dish.category_id) ?? 0) + 1);
+    }
+    return categoryRows
+      .filter((category) => counts.has(category.id))
+      .map((category) => ({
+        category,
+        count: counts.get(category.id) ?? 0,
+      }));
+  }, [pairingCandidates, categoryRows]);
+
+  const filteredPairings = useMemo(() => {
+    const needle = pairingSearch.trim().toLocaleLowerCase(
+      locale === "ru" ? "ru" : locale === "en" ? "en" : "ka",
+    );
+    return pairingCandidates.filter((row) => {
+      if (
+        pairingCategoryId !== "all" &&
+        row.dish.category_id !== pairingCategoryId
+      ) {
+        return false;
+      }
+      if (!needle) return true;
+      return row.searchBlob.includes(needle);
+    });
+  }, [pairingCandidates, pairingCategoryId, pairingSearch, locale]);
+
+  const selectedPairings = useMemo(() => {
+    const byId = new Map(items.map((dish) => [dish.id, dish]));
+    return draft.pairing_dish_ids
+      .map((id) => byId.get(id))
+      .filter((dish): dish is AdminDish => Boolean(dish));
+  }, [draft.pairing_dish_ids, items]);
+
+  function togglePairing(dishId: string) {
+    setDraft((current) => {
+      const selected = new Set(current.pairing_dish_ids);
+      if (selected.has(dishId)) selected.delete(dishId);
+      else selected.add(dishId);
+      return { ...current, pairing_dish_ids: [...selected] };
+    });
+  }
+
+  function clearPairings() {
+    setDraft((current) => ({ ...current, pairing_dish_ids: [] }));
+  }
 
   function upsertLocal(dish: AdminDish) {
     setItems((current) => {
@@ -227,6 +319,7 @@ export function MenuManager({
       carbs: nutritionDraftValue(dish.carbs),
       fat: nutritionDraftValue(dish.fat),
       is_available: dish.is_available,
+      pairing_dish_ids: [...(dish.pairing_dish_ids ?? [])],
       recipe: (dish.recipe ?? []).map((line) => ({
         name: line.name,
         quantity: String(line.quantity ?? ""),
@@ -235,6 +328,8 @@ export function MenuManager({
         stock_qty: String(line.stock_qty ?? ""),
       })),
     });
+    setPairingSearch("");
+    setPairingCategoryId("all");
     setError(null);
     formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
@@ -322,6 +417,7 @@ export function MenuManager({
       carbs: parseNutritionInput(draft.carbs),
       fat: parseNutritionInput(draft.fat),
       is_available: draft.is_available,
+      pairing_dish_ids: draft.pairing_dish_ids,
       recipe: draft.recipe.map((line) => ({
         name: line.name,
         unit: line.unit,
@@ -853,6 +949,176 @@ export function MenuManager({
             placeholder={t.ingredientsPlaceholder}
           />
         </div>
+        <div className="space-y-3 sm:col-span-2">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <p className="text-sm font-medium">{t.pairingsSection}</p>
+            <div className="flex items-center gap-2">
+              <p className="text-muted-foreground text-xs">
+                {t.pairingsSelected(draft.pairing_dish_ids.length)}
+              </p>
+              {draft.pairing_dish_ids.length > 0 ? (
+                <button
+                  type="button"
+                  className="text-muted-foreground hover:text-foreground text-xs underline-offset-2 hover:underline"
+                  onClick={clearPairings}
+                >
+                  {t.pairingsClear}
+                </button>
+              ) : null}
+            </div>
+          </div>
+          <p className="text-muted-foreground text-xs leading-relaxed">
+            {t.pairingsHint}
+          </p>
+          {pairingCandidates.length === 0 ? (
+            <p className="text-muted-foreground text-sm">{t.pairingsEmpty}</p>
+          ) : (
+            <div className="border-border/70 bg-card space-y-3 rounded-2xl border p-3 shadow-sm">
+              {selectedPairings.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {selectedPairings.map((dish) => (
+                    <button
+                      key={`sel-${dish.id}`}
+                      type="button"
+                      onClick={() => togglePairing(dish.id)}
+                      className="bg-primary/10 text-primary inline-flex max-w-full items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium"
+                      title={t.delete}
+                    >
+                      <span className="line-clamp-1">
+                        {dishLabel(dish.name, locale)}
+                      </span>
+                      <X className="size-3 shrink-0 opacity-70" aria-hidden />
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="flex gap-1 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                <button
+                  type="button"
+                  onClick={() => setPairingCategoryId("all")}
+                  className={cn(
+                    "shrink-0 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+                    pairingCategoryId === "all"
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border bg-background text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {t.pairingsAll}
+                  <span className="ml-1 opacity-70">
+                    {pairingCandidates.length}
+                  </span>
+                </button>
+                {pairingCategoryOptions.map(({ category, count }) => {
+                  const active = pairingCategoryId === category.id;
+                  return (
+                    <button
+                      key={category.id}
+                      type="button"
+                      onClick={() => setPairingCategoryId(category.id)}
+                      className={cn(
+                        "shrink-0 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+                        active
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border bg-background text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {categoryNameFromFields(category, locale)}
+                      <span className="ml-1 opacity-70">{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="relative">
+                <Search
+                  className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+                  aria-hidden
+                />
+                <Input
+                  id="pairing-search"
+                  value={pairingSearch}
+                  onChange={(event) => setPairingSearch(event.target.value)}
+                  placeholder={t.pairingsSearch}
+                  className="h-9 pr-9 pl-9"
+                  autoComplete="off"
+                />
+                {pairingSearch ? (
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-md"
+                    aria-label={t.pairingsClear}
+                    onClick={() => setPairingSearch("")}
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                ) : null}
+              </div>
+
+              <div className="max-h-64 overflow-y-auto rounded-xl border border-border/60">
+                {filteredPairings.length === 0 ? (
+                  <p className="text-muted-foreground px-3 py-6 text-center text-sm">
+                    {t.pairingsNoMatch}
+                  </p>
+                ) : (
+                  <ul className="divide-border/60 divide-y">
+                    {filteredPairings.map(({ dish, category, label }) => {
+                      const checked = draft.pairing_dish_ids.includes(dish.id);
+                      const catLabel = category
+                        ? categoryNameFromFields(category, locale)
+                        : "";
+                      return (
+                        <li key={dish.id}>
+                          <label
+                            className={cn(
+                              "flex cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors",
+                              checked
+                                ? "bg-primary/8"
+                                : "hover:bg-muted/40",
+                            )}
+                          >
+                            <input
+                              type="checkbox"
+                              className="accent-primary size-4 shrink-0"
+                              checked={checked}
+                              onChange={() => togglePairing(dish.id)}
+                            />
+                            <span className="bg-muted relative size-10 shrink-0 overflow-hidden rounded-lg">
+                              {dish.image_url ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  src={dish.image_url}
+                                  alt=""
+                                  className="size-full object-cover"
+                                />
+                              ) : (
+                                <span
+                                  className="from-muted to-muted/50 block size-full bg-linear-to-br"
+                                  aria-hidden
+                                />
+                              )}
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="line-clamp-1 text-sm font-medium leading-tight">
+                                {label}
+                              </span>
+                              <span className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] leading-snug">
+                                {catLabel ? <span>{catLabel}</span> : null}
+                                <span className="text-brand-price font-semibold tabular-nums">
+                                  {formatGel(dish.price)}
+                                </span>
+                              </span>
+                            </span>
+                          </label>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
         <div className="space-y-2 sm:col-span-2">
           <p className="text-sm font-medium">{t.recipeSection}</p>
           <p className="text-muted-foreground text-xs leading-relaxed">
@@ -1216,7 +1482,6 @@ export function MenuManager({
                 </Label>
                 <Switch
                   id={`stock-${dish.id}`}
-                  nativeButton
                   checked={dish.is_available}
                   onCheckedChange={(checked) => void toggle(dish, checked)}
                 />

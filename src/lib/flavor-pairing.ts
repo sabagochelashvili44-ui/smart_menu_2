@@ -524,14 +524,21 @@ export function cartHasCourse(cart: FlavorDish[], course: FlavorCourse) {
   return cart.some((dish) => flavorCourse(dish) === course);
 }
 
-/** A: 3 dishes. B: dessert, no drink → 2 dishes + dessert. Drink only → 2 dishes + drink. C: both → 1 of each. */
+/** A: 3 dishes. B: dessert, no drink → 2 dishes + dessert. Drink only → 2 dishes + drink. C: both → 1 of each.
+ *  When the cart is savory-only but admin curated a drink/dessert companion, reserve that slot. */
 export function cartRecommendationSlots(
   hasDessert: boolean,
   hasDrink: boolean,
+  options?: { preferDrink?: boolean; preferDessert?: boolean },
 ): FlavorCourse[] {
   if (hasDessert && hasDrink) return ["dish", "dessert", "drink"];
   if (hasDessert) return ["dish", "dish", "dessert"];
   if (hasDrink) return ["dish", "dish", "drink"];
+  const preferDrink = Boolean(options?.preferDrink);
+  const preferDessert = Boolean(options?.preferDessert);
+  if (preferDessert && preferDrink) return ["dish", "dessert", "drink"];
+  if (preferDessert) return ["dish", "dish", "dessert"];
+  if (preferDrink) return ["dish", "dish", "drink"];
   return ["dish", "dish", "dish"];
 }
 

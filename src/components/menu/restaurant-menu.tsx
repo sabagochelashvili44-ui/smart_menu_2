@@ -92,6 +92,7 @@ export type MenuDish = {
   is_available: boolean;
   ingredients?: string[] | null;
   wine_pairing?: string | null;
+  pairing_dish_ids?: string[] | null;
   calories?: number | null;
   protein?: number | null;
   carbs?: number | null;
@@ -332,7 +333,7 @@ export function RestaurantMenu({
         context,
         lastAddedId,
         locale,
-        limit: 3,
+        limit: 12,
       }),
     [cart, categories, context, diet, dishes, lastAddedId, locale],
   );
@@ -1060,6 +1061,7 @@ export function RestaurantMenu({
         onPendingPromptConsumed={clearChatPrompt}
         quantityFor={quantityFor}
         cartIds={cart.map((line) => line.dishId ?? line.id)}
+        lastAddedId={lastAddedId}
         companionSuggestions={recommendations}
         companionMix={upsell.mix}
         onAddToCart={(dish) => {

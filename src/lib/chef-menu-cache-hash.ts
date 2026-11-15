@@ -43,6 +43,9 @@ export function hashChefMenuCache(input: {
         dish.is_available === false ? "0" : "1",
         listToken(dish.ingredients ?? null),
         listToken(dish.allergens ?? null),
+        listToken(
+          (dish.pairing_dish_ids ?? []).map((id) => String(id ?? "").trim()),
+        ),
       ].join("|"),
     )
     .sort();

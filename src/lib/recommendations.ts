@@ -15,6 +15,7 @@ export type RecommendableDish = CrossSellDish & {
   allergens?: string[] | null;
   ingredients?: string[] | null;
   wine_pairing?: string | null;
+  pairing_dish_ids?: string[] | null;
   name_en?: string | null;
   name_ru?: string | null;
   description_en?: string | null;
@@ -126,6 +127,7 @@ function cartFlavorState(
   dishes: RecommendableDish[],
   categories: CategoryRef[],
   inCart: Set<string>,
+  options?: { preferDrink?: boolean; preferDessert?: boolean },
 ) {
   const cartDishes = dishes
     .filter((dish) => inCart.has(dish.id))
@@ -136,8 +138,28 @@ function cartFlavorState(
     cartDishes,
     hasDessert,
     hasDrink,
-    mix: cartRecommendationSlots(hasDessert, hasDrink),
+    mix: cartRecommendationSlots(hasDessert, hasDrink, options),
   };
+}
+
+function curatedPreferFlags(
+  cartIds: Iterable<string>,
+  byId: Map<string, RecommendableDish>,
+  categories: CategoryRef[],
+) {
+  let preferDrink = false;
+  let preferDessert = false;
+  for (const cartId of cartIds) {
+    const source = byId.get(cartId);
+    for (const id of source?.pairing_dish_ids ?? []) {
+      const companion = byId.get(id);
+      if (!companion || !companion.is_available) continue;
+      const course = flavorCourse(toFlavorDish(companion, categories));
+      if (course === "drink") preferDrink = true;
+      if (course === "dessert") preferDessert = true;
+    }
+  }
+  return { preferDrink, preferDessert };
 }
 
 function withReason(
@@ -173,13 +195,55 @@ export function pickContextUpsells({
 }): UpsellResult {
   const inCart = new Set(cart.map((line) => line.id));
   const lastId = lastAddedId ?? cart[cart.length - 1]?.id;
-  const { cartDishes, mix } = cartFlavorState(dishes, categories, inCart);
+  const byId = new Map(dishes.map((dish) => [dish.id, dish]));
+  const prefer = curatedPreferFlags(
+    lastId ? [lastId, ...inCart] : inCart,
+    byId,
+    categories,
+  );
+  const { cartDishes, mix } = cartFlavorState(
+    dishes,
+    categories,
+    inCart,
+    prefer,
+  );
 
   const allowed = (dish: RecommendableDish) => {
     if (!dish.is_available || inCart.has(dish.id)) return false;
     const category = categoryName(dish, categories);
     return dishMatchesDiet({ ...dish, category }, diet);
   };
+
+  // Admin-curated companions for the last-selected item: show ALL of them,
+  // and never mix in heuristic suggestions.
+  const curatedSource = lastId ? byId.get(lastId) : null;
+  const curatedIds = curatedSource?.pairing_dish_ids ?? [];
+  if (curatedIds.length > 0) {
+    const curatedItems: RecommendableDish[] = [];
+    for (const id of curatedIds) {
+      const companion = byId.get(id);
+      // Keep every configured companion that still exists; only skip sold-out
+      // and items already in the cart.
+      if (!companion || !companion.is_available || inCart.has(companion.id)) {
+        continue;
+      }
+      curatedItems.push(
+        withReason(companion, locale, "shareTable", categories),
+      );
+    }
+    return {
+      heading: "together",
+      items: curatedItems,
+      mix: cartRecommendationSlots(
+        curatedItems.some(
+          (dish) => flavorCourse(toFlavorDish(dish, categories)) === "dessert",
+        ),
+        curatedItems.some(
+          (dish) => flavorCourse(toFlavorDish(dish, categories)) === "drink",
+        ),
+      ),
+    };
+  }
 
   const flavorItems = pickCartAwareCompanions({
     cart: cartDishes,
@@ -195,12 +259,17 @@ export function pickContextUpsells({
     })
     .filter((dish): dish is RecommendableDish => Boolean(dish));
 
-  if (fromFlavor.length >= limit) {
-    return { heading: "together", items: fromFlavor.slice(0, limit), mix };
+  const used = new Set<string>();
+  const items: RecommendableDish[] = [];
+  for (const dish of fromFlavor) {
+    if (items.length >= limit || used.has(dish.id)) continue;
+    items.push(dish);
+    used.add(dish.id);
+  }
+  if (items.length >= limit) {
+    return { heading: "together", items: items.slice(0, limit), mix };
   }
 
-  const used = new Set(fromFlavor.map((dish) => dish.id));
-  const items = [...fromFlavor];
   const needed = [...mix];
   for (const dish of items) {
     const index = needed.indexOf(
@@ -242,14 +311,22 @@ export function fillChefRecommendationCards({
   preferred,
   companions,
   mix,
+  priorityIds = [],
+  catalogDishes = [],
 }: {
   preferred: RecommendableDish[];
   companions: RecommendableDish[];
   mix: FlavorCourse[];
+  /** Admin-curated companion ids — when set, cards are ONLY these (all of them). */
+  priorityIds?: string[];
+  /** Full menu used to resolve curated ids not present in preferred/companions. */
+  catalogDishes?: RecommendableDish[];
 }): RecommendableDish[] {
-  const slots = mix.length ? mix : (["dish", "dish", "dish"] as FlavorCourse[]);
-  const picked: RecommendableDish[] = [];
-  const used = new Set<string>();
+  const catalog = [...catalogDishes, ...preferred, ...companions];
+  const byId = new Map<string, RecommendableDish>();
+  for (const dish of catalog) {
+    if (dish?.id) byId.set(dish.id, dish);
+  }
 
   function courseOf(dish: RecommendableDish): FlavorCourse {
     return flavorCourse({
@@ -265,9 +342,27 @@ export function fillChefRecommendationCards({
     });
   }
 
+  if (priorityIds.length > 0) {
+    return priorityIds
+      .map((id) => byId.get(id))
+      .filter((dish): dish is RecommendableDish => Boolean(dish))
+      .filter((dish) => dish.is_available !== false)
+      .map((dish) => ({
+        ...dish,
+        pairReason: dish.pairReason ?? undefined,
+      }));
+  }
+
+  const slots = mix.length ? [...mix] : (["dish", "dish", "dish"] as FlavorCourse[]);
+  const picked: RecommendableDish[] = [];
+  const used = new Set<string>();
+
   function takeFrom(source: RecommendableDish[], course: FlavorCourse) {
     const next = source.find(
-      (dish) => !used.has(dish.id) && courseOf(dish) === course,
+      (dish) =>
+        dish.is_available !== false &&
+        !used.has(dish.id) &&
+        courseOf(dish) === course,
     );
     if (!next) return false;
     used.add(next.id);
@@ -289,4 +384,101 @@ export function fillChefRecommendationCards({
     takeFrom([...preferred, ...companions], course);
   }
   return picked.slice(0, 3);
+}
+
+/** Official companion ids for the focused cart item (last added), in admin order. */
+export function curatedPriorityIdsFromCart(
+  cartIds: string[],
+  dishes: Array<{ id: string; pairing_dish_ids?: string[] | null }>,
+  options?: { lastAddedId?: string | null },
+) {
+  const byId = new Map(dishes.map((dish) => [dish.id, dish]));
+  const focusId =
+    options?.lastAddedId && byId.has(options.lastAddedId)
+      ? options.lastAddedId
+      : cartIds[cartIds.length - 1];
+  if (!focusId) return [];
+  const source = byId.get(focusId);
+  const cartSet = new Set(cartIds);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const id of source?.pairing_dish_ids ?? []) {
+    if (!id || seen.has(id) || cartSet.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+const DISH_ID_LINE_RE =
+  /\n?\s*\*?\*?DISH_IDS?\*?\*?:\s*([^\n]*)/i;
+
+/**
+ * Force DISH_IDS to the admin pairing list for a subject dish.
+ * Prefer an explicit subjectDishId (from the guest question) over the cart.
+ */
+export function enforceCuratedPairingsInChefReply({
+  text,
+  dishes,
+  cartIds,
+  lastAddedId = null,
+  subjectDishId = null,
+  clearWhenEmpty = false,
+  noAlcohol = false,
+}: {
+  text: string;
+  dishes: RecommendableDish[];
+  cartIds: string[];
+  lastAddedId?: string | null;
+  subjectDishId?: string | null;
+  /** When the subject has no admin pairings, strip DISH_IDS to none. */
+  clearWhenEmpty?: boolean;
+  noAlcohol?: boolean;
+}) {
+  const byIdLookup = new Map(dishes.map((dish) => [dish.id, dish]));
+  let priorityIds: string[] = [];
+  if (subjectDishId && byIdLookup.has(subjectDishId)) {
+    const source = byIdLookup.get(subjectDishId);
+    const cartSet = new Set(cartIds);
+    for (const id of source?.pairing_dish_ids ?? []) {
+      if (!id || cartSet.has(id)) continue;
+      priorityIds.push(id);
+    }
+    if (!priorityIds.length && clearWhenEmpty) {
+      // Drop invented companion cards; keep a short refusal instead of Gemini prose.
+      const sourceName = source?.name?.trim() || "ამ კერძს";
+      return `ამ მენიუში ${sourceName}-თან ერთად შესათავაზებელი პოზიცია ჯერ მითითებული არ არის.\nDISH_IDS: none`;
+    }
+    if (!priorityIds.length) return text;
+  } else {
+    if (!cartIds.length) return text;
+    priorityIds = curatedPriorityIdsFromCart(cartIds, dishes, {
+      lastAddedId,
+    });
+    if (!priorityIds.length) return text;
+  }
+
+  const byId = new Map(dishes.map((dish) => [dish.id.toLowerCase(), dish]));
+  const curated = priorityIds
+    .map((id) => byId.get(id.toLowerCase()))
+    .filter((dish): dish is RecommendableDish => Boolean(dish))
+    .filter((dish) => dish.is_available !== false)
+    .filter((dish) => !(noAlcohol && /ღვინ|wine|საფერავ|ლუდ|beer|qvevri|ყვევრ/i.test(dish.name)));
+
+  if (!curated.length) return text;
+
+  const uniqueIds = curated.map((dish) => dish.id);
+  let spoken = text.replace(DISH_ID_LINE_RE, "\n").trimEnd();
+  const missingNames = curated
+    .map((dish) => dish.name.trim())
+    .filter(
+      (name) =>
+        name &&
+        !spoken.toLocaleLowerCase("ka").includes(name.toLocaleLowerCase("ka")),
+    );
+  if (missingNames.length) {
+    spoken = `${spoken.trim()} ერთად გირჩევთ: ${missingNames.join(", ")}.`.trim();
+  }
+
+  return `${spoken}\nDISH_IDS: ${uniqueIds.join(",")}`;
 }

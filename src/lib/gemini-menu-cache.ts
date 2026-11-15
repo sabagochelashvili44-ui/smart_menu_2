@@ -6,8 +6,18 @@ export {
   hashChefMenuCache,
 } from "@/lib/chef-menu-cache-hash";
 
-/** Safety-net TTL. Menu edits must invalidate immediately and not wait for this. */
-export const GEMINI_MENU_CACHE_TTL_SECONDS = 14_400;
+/** Safety-net TTL (30m). Menu edits must invalidate immediately and not wait for this. */
+export const GEMINI_MENU_CACHE_TTL_SECONDS = 1_800;
+
+/**
+ * Skip explicit remote cache when the static block is too small to pay off.
+ * Gemini requires min_total_token_count=1024 (~3.5k+ chars for mixed KA/EN).
+ */
+export const GEMINI_MENU_CACHE_MIN_CHARS = 4_000;
+
+export function shouldCreateGeminiMenuCache(systemInstruction: string) {
+  return String(systemInstruction ?? "").trim().length >= GEMINI_MENU_CACHE_MIN_CHARS;
+}
 
 type MenuCacheEntry = {
   name: string;
@@ -43,11 +53,12 @@ function disableRemoteCacheCreates(error: unknown) {
         ? error
         : JSON.stringify(error ?? "");
   if (
-    /FreeTier|TotalCachedContentStorageTokens|limit=0|RESOURCE_EXHAUSTED|cached content/i.test(
+    /FreeTier|TotalCachedContentStorageTokens|limit=0|RESOURCE_EXHAUSTED|Cached content is too small|min_total_token_count/i.test(
       message,
     )
   ) {
     // Paid keys can still report FreeTier for caches; stop hammering for 6h.
+    // "too small" also stops retries until prompt shape grows (avoids 400 spam).
     cachesDisabledUntil = Date.now() + 6 * 60 * 60 * 1000;
     console.warn(
       "[gemini-menu-cache] remote cache disabled for 6h after quota/exhaustion",
@@ -135,6 +146,7 @@ export async function getOrCreateGeminiMenuCache(input: {
   const apiKey = geminiApiKey();
   if (!apiKey) return null;
   if (cacheCreateBlocked()) return null;
+  if (!shouldCreateGeminiMenuCache(input.systemInstruction)) return null;
 
   try {
     const ai = new GoogleGenAI({ apiKey });
@@ -183,6 +195,7 @@ export function warmGeminiMenuCache(input: {
   systemInstruction: string;
 }) {
   if (cacheCreateBlocked()) return;
+  if (!shouldCreateGeminiMenuCache(input.systemInstruction)) return;
   if (peekGeminiMenuCache(input)) return;
   void getOrCreateGeminiMenuCache(input).catch(() => {});
 }

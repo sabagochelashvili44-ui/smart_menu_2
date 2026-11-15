@@ -14,6 +14,7 @@ export type ChatSuggestDish = {
   category_id?: string;
   ingredients?: string[] | null;
   wine_pairing?: string | null;
+  pairing_dish_ids?: string[] | null;
   calories?: number | null;
   protein?: number | null;
   carbs?: number | null;
@@ -29,6 +30,15 @@ export function isChefRecommendTurn(userText: string, ids: string[]) {
   );
 }
 
+/** Open / multi-constraint recommend — Flash. Simple browse stays Lite. */
+export function isComplexChefRecommend(message: string) {
+  const text = message.trim();
+  if (!text) return false;
+  return /მირჩიე|მირჩიეთ|recommend|suggest|ბესტსელ|bestseller|ტოპ\s*\d|top\s*\d|სხვა\s*რამე|what else|посовет|ლანჩ|lunch|ბიუჯეტ|budget|under\s*₾|under\s*\$|ორი\s*სტუმრ|dinner for|party|რა\s*შევუკვეთოთ|choose for me|სამარხვ|ვეგეტარ|vegetarian|vegan|გლუტენ|gluten|რძის|dairy|allergen/i.test(
+    text,
+  );
+}
+
 const CHEF_FACT_RE =
   /რა ღირს|რა ფასი|ფასი|how much|what(?:'s| is) (?:in|the price)|price of|сколько стоит|сколько|цена|стоит|ingredients?|ингредиент|состав|из чего|ინგრედიენტ|შემადგენლ|allergen|аллерг|ალერგენ|ალერგი|calories?|калор|ккал|კალორ|macros?|protein|белк|prep(?: time)?|готов|რამდენ ხან|მზადდება|available|в наличии|есть ли|არის თუ არა|გაქვთ თუ/i;
 
@@ -36,12 +46,14 @@ export function isChefFactTurn(userText: string) {
   return CHEF_FACT_RE.test(userText.trim());
 }
 
-/** Flash for pairing/recommend; Lite for named-dish facts. When in doubt, Flash. */
+/**
+ * Lite is primary for standard turns (facts, simple browse).
+ * Flash only for complex open recommend / multi-constraint prompts.
+ */
 export function routeChefModel(message: string): "flash" | "lite" {
   const text = message.trim();
-  if (isChefRecommendTurn(text, [])) return "flash";
-  if (isChefFactTurn(text)) return "lite";
-  return "flash";
+  if (isComplexChefRecommend(text)) return "flash";
+  return "lite";
 }
 
 const LIGHT_RE = /სალათ|სუპ|salad|soup|салат|суп|cold starter|ცივი/i;
@@ -111,15 +123,14 @@ export function shouldSuppressAlcohol(options: {
 
 export function pairingLine(
   dish: ChatSuggestDish,
-  pairKhinkali: string,
+  _pairKhinkali: string,
   pairWith: (pairing: string) => string,
   skipAlcohol = false,
 ) {
   if (skipAlcohol) return "";
+  // Only admin/printed wine_pairing — never invent khinkali→saperavi defaults.
   const listed = dish.wine_pairing?.trim();
   if (listed) return pairWith(listed);
-  const blob = `${dish.name} ${dish.category ?? ""}`;
-  if (KHINKALI_RE.test(blob)) return pairKhinkali;
   return "";
 }
 
@@ -142,13 +153,28 @@ export function chefReplyLooksLeaked(text: string) {
   ) {
     return true;
   }
-  // English instruction/meta with almost no guest-script letters.
+  // English-only text: flag instruction echoes, not normal EN guest prose
+  // ("I recommend our Khinkali from the menu" must remain acceptable).
   const hasGuestScript = /[\u10A0-\u10FFА-Яа-яЁё]/.test(value);
-  if (
-    !hasGuestScript &&
-    /\b(recommend|pairing|guest|menu|dish|cart|output|exactly)\b/i.test(value)
-  ) {
-    return true;
+  if (!hasGuestScript) {
+    if (
+      /\b(output EXACTLY|systemInstruction|LIVE MENU FULL|When recommending|CART &\s*3-CARD|do not invent|pairs_with|mandatory whenever)\b/i.test(
+        value,
+      )
+    ) {
+      return true;
+    }
+    const lines = value
+      .split(/\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const instructionish = lines.filter((line) => CHEF_LEAK_LINE.test(line));
+    if (
+      lines.length >= 2 &&
+      instructionish.length >= Math.ceil(lines.length * 0.6)
+    ) {
+      return true;
+    }
   }
   return false;
 }
@@ -185,11 +211,30 @@ export function scrubChefInstructionLeak(text: string) {
     .trim();
 }
 
+const UUID_IN_TEXT_RE =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+/** Recover or append DISH_IDS so truncation does not force a second model bill. */
+export function ensureChefDishIdsTrailer(raw: string) {
+  const text = String(raw ?? "").trim();
+  if (!text) return text;
+  if (/DISH_IDS:\s*\S+/i.test(text)) return text;
+  const spoken = scrubChefInstructionLeak(text);
+  if (!spoken || spoken.length < 12) return text;
+  const ids = text.match(UUID_IN_TEXT_RE);
+  if (ids?.length) {
+    const unique = [...new Set(ids.map((id) => id.toLowerCase()))];
+    return `${spoken.trim()}\nDISH_IDS: ${unique.join(",")}`;
+  }
+  return `${spoken.trim()}\nDISH_IDS: none`;
+}
+
 /** Guest-facing reply that finished with DISH_IDS and is not an instruction leak. */
 export function isAcceptableChefReply(raw: string) {
-  if (!/DISH_IDS:\s*\S+/i.test(raw)) return false;
-  if (chefReplyLooksLeaked(raw)) return false;
-  const spoken = scrubChefInstructionLeak(raw);
+  const withIds = ensureChefDishIdsTrailer(raw);
+  if (!/DISH_IDS:\s*\S+/i.test(withIds)) return false;
+  if (chefReplyLooksLeaked(withIds)) return false;
+  const spoken = scrubChefInstructionLeak(withIds);
   if (!spoken || spoken.length < 12) return false;
   if (chefReplyLooksLeaked(spoken)) return false;
   return true;

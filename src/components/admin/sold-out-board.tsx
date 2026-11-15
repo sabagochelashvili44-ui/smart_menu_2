@@ -178,7 +178,6 @@ export function SoldOutBoard({
                           </Label>
                           <Switch
                             id={`kitchen-stock-${dish.id}`}
-                            nativeButton
                             size="sm"
                             checked={dish.is_available}
                             disabled={pendingId === dish.id}

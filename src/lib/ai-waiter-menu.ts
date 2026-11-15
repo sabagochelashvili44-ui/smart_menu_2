@@ -85,18 +85,33 @@ export async function loadWaiterRestaurantServiceFee(restaurantId: string) {
 
 const DISH_I18N = "name_en, name_ru, description_en, description_ru";
 const DISH_SELECT_FULL =
-  `id, name, price, bottle_price, glass_price, description, category_id, ingredients, allergens, calories, protein, carbs, fat, is_available, prep_minutes, ${DISH_I18N}`;
+  `id, name, price, bottle_price, glass_price, description, category_id, ingredients, allergens, calories, protein, carbs, fat, is_available, prep_minutes, wine_pairing, pairing_dish_ids, ${DISH_I18N}`;
 const DISH_SELECT_NO_PREP =
-  `id, name, price, description, category_id, ingredients, allergens, calories, protein, carbs, fat, is_available, ${DISH_I18N}`;
+  `id, name, price, description, category_id, ingredients, allergens, calories, protein, carbs, fat, is_available, wine_pairing, pairing_dish_ids, ${DISH_I18N}`;
 const DISH_SELECT_CORE =
   `id, name, price, description, category_id, allergens, is_available, ${DISH_I18N}`;
 const DISH_SELECT_FULL_NO_I18N =
-  "id, name, price, description, category_id, ingredients, allergens, calories, protein, carbs, fat, is_available, prep_minutes";
+  "id, name, price, description, category_id, ingredients, allergens, calories, protein, carbs, fat, is_available, prep_minutes, wine_pairing, pairing_dish_ids";
 const DISH_SELECT_NO_POUR =
-  `id, name, price, description, category_id, ingredients, allergens, calories, protein, carbs, fat, is_available, prep_minutes, ${DISH_I18N}`;
+  `id, name, price, description, category_id, ingredients, allergens, calories, protein, carbs, fat, is_available, prep_minutes, wine_pairing, pairing_dish_ids, ${DISH_I18N}`;
+const DISH_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function asTextList(value: unknown): string[] | null {
   return normalizeMenuTextList(value);
+}
+
+function asPairingIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const id = String(item ?? "").trim();
+    if (!DISH_UUID_RE.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
 }
 
 function mapWaiterDish(
@@ -117,6 +132,8 @@ function mapWaiterDish(
     glass_price: parseMoney(row.glass_price),
     allergens: asTextList(row.allergens),
     ingredients: asTextList(row.ingredients),
+    wine_pairing: row.wine_pairing ? String(row.wine_pairing) : null,
+    pairing_dish_ids: asPairingIds(row.pairing_dish_ids),
     category: categoryNameById.get(categoryId) ?? null,
     is_available: row.is_available !== false,
     calories: parseNutritionInput(row.calories),
@@ -152,6 +169,18 @@ async function fetchWaiterMenuDishes(restaurantId: string) {
   data = first.data as unknown[] | null;
   error = first.error;
 
+  if (error && /pairing_dish_ids|wine_pairing/i.test(error.message)) {
+    const stripped = DISH_SELECT_FULL
+      .replace(", wine_pairing, pairing_dish_ids", "")
+      .replace(", wine_pairing", "")
+      .replace(", pairing_dish_ids", "");
+    const retry = await supabase
+      .from("dishes")
+      .select(stripped)
+      .eq("restaurant_id", restaurantId);
+    data = retry.data as unknown[] | null;
+    error = retry.error;
+  }
   if (error && /bottle_price|glass_price/i.test(error.message)) {
     const retry = await supabase
       .from("dishes")

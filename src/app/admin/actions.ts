@@ -182,10 +182,10 @@ export async function loadAdminMenu() {
   const categoryRows = (categories.data ?? []) as AdminCategory[];
   const categoryIds = categoryRows.map((row) => row.id);
   let dishSelect =
-    "id, category_id, name, description, price, bottle_price, glass_price, margin_score, image_url, allergens, ingredients, is_available, calories, protein, carbs, fat, name_en, name_ru, description_en, description_ru, prep_minutes";
+    "id, category_id, name, description, price, bottle_price, glass_price, margin_score, image_url, allergens, ingredients, is_available, calories, protein, carbs, fat, name_en, name_ru, description_en, description_ru, prep_minutes, pairing_dish_ids";
   const dishSelectNoPrep = dishSelect.replace(", prep_minutes", "");
   const dishSelectMenu =
-    "id, category_id, name, description, price, bottle_price, glass_price, margin_score, image_url, allergens, ingredients, is_available, name_en, name_ru, description_en, description_ru";
+    "id, category_id, name, description, price, bottle_price, glass_price, margin_score, image_url, allergens, ingredients, is_available, name_en, name_ru, description_en, description_ru, pairing_dish_ids";
   const dishSelectCore =
     "id, category_id, name, description, price, bottle_price, glass_price, margin_score, image_url, allergens, is_available";
 
@@ -200,8 +200,21 @@ export async function loadAdminMenu() {
   dishRows = byRestaurant.data as AdminDish[] | null;
   dishError = byRestaurant.error;
 
+  if (dishError && /pairing_dish_ids/i.test(dishError.message)) {
+    dishSelect = dishSelect.replace(", pairing_dish_ids", "");
+    const withoutPairings = await supabase
+      .from("dishes")
+      .select(dishSelect)
+      .eq("restaurant_id", restaurant.id)
+      .order("name");
+    dishRows = withoutPairings.data as AdminDish[] | null;
+    dishError = withoutPairings.error;
+  }
+
   if (dishError && /prep_minutes/i.test(dishError.message)) {
-    dishSelect = dishSelectNoPrep;
+    dishSelect = dishSelect.includes("pairing_dish_ids")
+      ? dishSelectNoPrep
+      : dishSelectNoPrep.replace(", pairing_dish_ids", "");
     const withoutPrep = await supabase
       .from("dishes")
       .select(dishSelect)
@@ -237,9 +250,12 @@ export async function loadAdminMenu() {
   }
 
   if (dishError && /calories|protein|carbs|\bfat\b/i.test(dishError.message)) {
+    const menuSelect = dishSelect.includes("pairing_dish_ids")
+      ? dishSelectMenu
+      : dishSelectMenu.replace(", pairing_dish_ids", "");
     const withoutNutrition = await supabase
       .from("dishes")
-      .select(dishSelectMenu)
+      .select(menuSelect)
       .eq("restaurant_id", restaurant.id)
       .order("name");
     dishRows = withoutNutrition.data as AdminDish[] | null;
@@ -448,18 +464,34 @@ export async function deleteAdminCategory(id: string) {
 }
 
 const DISH_COLUMNS_NO_PREP =
-  "id, category_id, name, description, price, bottle_price, glass_price, margin_score, image_url, allergens, ingredients, is_available, calories, protein, carbs, fat, name_en, name_ru, description_en, description_ru";
+  "id, category_id, name, description, price, bottle_price, glass_price, margin_score, image_url, allergens, ingredients, is_available, calories, protein, carbs, fat, name_en, name_ru, description_en, description_ru, pairing_dish_ids";
 const DISH_COLUMNS = `${DISH_COLUMNS_NO_PREP}, prep_minutes`;
 const DISH_COLUMNS_MENU =
-  "id, category_id, name, description, price, bottle_price, glass_price, margin_score, image_url, allergens, ingredients, is_available, name_en, name_ru, description_en, description_ru";
+  "id, category_id, name, description, price, bottle_price, glass_price, margin_score, image_url, allergens, ingredients, is_available, name_en, name_ru, description_en, description_ru, pairing_dish_ids";
 const DISH_COLUMNS_CORE =
   "id, category_id, name, description, price, bottle_price, glass_price, margin_score, image_url, allergens, is_available";
 const POUR_COLUMN_ERROR = /bottle_price|glass_price/;
 const NUTRITION_COLUMN_ERROR = /calories|protein|carbs|\bfat\b/i;
 const I18N_COLUMN_ERROR = /name_en|name_ru|description_en|description_ru/;
+const PAIRING_COLUMN_ERROR = /pairing_dish_ids/;
+const DISH_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseTextList(value: unknown): string[] {
   return normalizeMenuTextList(value) ?? [];
+}
+
+function parsePairingDishIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const id = String(item ?? "").trim();
+    if (!DISH_UUID_RE.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
 }
 
 function toAdminDish(row: Record<string, unknown>): AdminDish {
@@ -485,6 +517,7 @@ function toAdminDish(row: Record<string, unknown>): AdminDish {
     name_ru: row.name_ru ? String(row.name_ru) : null,
     description_en: row.description_en ? String(row.description_en) : null,
     description_ru: row.description_ru ? String(row.description_ru) : null,
+    pairing_dish_ids: parsePairingDishIds(row.pairing_dish_ids),
   };
 }
 
@@ -646,6 +679,7 @@ export type DishInput = {
   name_ru?: string | null;
   description_en?: string | null;
   description_ru?: string | null;
+  pairing_dish_ids?: string[];
   recipe?: RecipeInputLine[];
 };
 
@@ -714,7 +748,27 @@ export async function saveAdminDish(input: DishInput) {
     name_ru: optionalI18n(input.name_ru),
     description_en: optionalI18n(input.description_en),
     description_ru: optionalI18n(input.description_ru),
+    pairing_dish_ids: parsePairingDishIds(input.pairing_dish_ids).filter(
+      (id) => id !== input.id,
+    ),
   };
+
+  // Keep only companion ids that belong to this restaurant's menu.
+  if (
+    Array.isArray(currentPayload.pairing_dish_ids) &&
+    (currentPayload.pairing_dish_ids as string[]).length > 0
+  ) {
+    const wanted = currentPayload.pairing_dish_ids as string[];
+    const owned = await supabase
+      .from("dishes")
+      .select("id")
+      .eq("restaurant_id", restaurantId)
+      .in("id", wanted);
+    if (!owned.error) {
+      const allowed = new Set((owned.data ?? []).map((row) => String(row.id)));
+      currentPayload.pairing_dish_ids = wanted.filter((id) => allowed.has(id));
+    }
+  }
 
   let useRestaurantFilter = true;
   const write = (body: Record<string, unknown>) => {
@@ -734,9 +788,17 @@ export async function saveAdminDish(input: DishInput) {
     currentPayload = omitKeys(currentPayload, ["restaurant_id"]);
     result = await write(currentPayload).select(selectColumns).maybeSingle();
   }
+  if (result.error && PAIRING_COLUMN_ERROR.test(result.error.message)) {
+    currentPayload = omitKeys(currentPayload, ["pairing_dish_ids"]);
+    selectColumns = selectColumns.replace(", pairing_dish_ids", "");
+    result = await write(currentPayload).select(selectColumns).maybeSingle();
+  }
   if (result.error && /prep_minutes/i.test(result.error.message)) {
     currentPayload = omitKeys(currentPayload, ["prep_minutes"]);
-    selectColumns = DISH_COLUMNS_NO_PREP;
+    selectColumns = DISH_COLUMNS_NO_PREP.replace(
+      ", pairing_dish_ids",
+      selectColumns.includes("pairing_dish_ids") ? ", pairing_dish_ids" : "",
+    );
     result = await write(currentPayload).select(selectColumns).maybeSingle();
   }
   if (result.error && POUR_COLUMN_ERROR.test(result.error.message)) {
@@ -754,7 +816,12 @@ export async function saveAdminDish(input: DishInput) {
       "fat",
     ]);
     result = await write(currentPayload)
-      .select(DISH_COLUMNS_MENU)
+      .select(
+        DISH_COLUMNS_MENU.replace(
+          ", pairing_dish_ids",
+          selectColumns.includes("pairing_dish_ids") ? ", pairing_dish_ids" : "",
+        ),
+      )
       .maybeSingle();
   }
   if (result.error && /ingredients/i.test(result.error.message)) {

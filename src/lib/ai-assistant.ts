@@ -30,6 +30,7 @@ export type AssistantDish = {
   allergens?: string[] | null;
   ingredients?: string[] | null;
   wine_pairing?: string | null;
+  pairing_dish_ids?: string[] | null;
   category?: string | null;
   is_available?: boolean;
   order_count?: number;
@@ -222,6 +223,28 @@ function ingredientsCoveredByDesc(ingredients: string[], description: string) {
   });
 }
 
+function shortIndexTags(dish: AssistantDish, locale: MenuLocale) {
+  const facts = dishFacts(dish, locale);
+  const tags: string[] = [];
+  const dietBlob = facts.dietTags.join(" ").toLowerCase();
+  if (/fasting|vegan|სამარხვ|ვეგან/.test(dietBlob)) tags.push("[V]");
+  else if (/vegetarian|ვეგეტარ/.test(dietBlob)) tags.push("[VG]");
+  const allBlob = [
+    ...(facts.allergens ?? []),
+    ...(dish.allergens ?? []),
+    ...(dish.ingredients ?? []),
+    dish.name,
+  ]
+    .join(" ")
+    .toLowerCase();
+  const hasGluten = /გლუტენ|gluten|ხორბალ|ხორბ|wheat|ფქვილ|flour|ცომ/.test(
+    allBlob,
+  );
+  if (!hasGluten) tags.push("[GF]");
+  if (/ნიგვზ|walnut|nut\b|თხილ|კაკლ/.test(allBlob)) tags.push("[nuts]");
+  return tags;
+}
+
 function compactIndexLine(dish: AssistantDish, locale: MenuLocale) {
   const facts = dishFacts(dish, locale);
   const parts = [
@@ -234,12 +257,16 @@ function compactIndexLine(dish: AssistantDish, locale: MenuLocale) {
   if (typeof dish.bottle_price === "number") {
     parts.push(`bottle:${formatGel(dish.bottle_price)}`);
   }
-  if (facts.dietTags.length) parts.push(`diet:${facts.dietTags.join(",")}`);
-  if (facts.allergens.length) parts.push(`all:${facts.allergens.join(",")}`);
+  const tags = shortIndexTags(dish, locale);
+  if (tags.length) parts.push(tags.join(""));
   return `- ${parts.join(" | ")}`;
 }
 
-function fullDishCard(dish: AssistantDish, locale: MenuLocale) {
+function fullDishCard(
+  dish: AssistantDish,
+  locale: MenuLocale,
+  byId?: Map<string, AssistantDish>,
+) {
   const facts = dishFacts(dish, locale);
   const lines = [`[id:${dish.id || "unknown"}] ${facts.displayName}`];
   if (locale !== "ka" && facts.rawName && facts.rawName !== facts.displayName) {
@@ -260,6 +287,27 @@ function fullDishCard(dish: AssistantDish, locale: MenuLocale) {
   if (dish.prep_minutes && dish.prep_minutes > 0) {
     lines.push(`prep: ${dish.prep_minutes} min`);
   }
+  const pairIds = (dish.pairing_dish_ids ?? []).filter(Boolean);
+  if (pairIds.length && byId) {
+    const pairs = pairIds
+      .map((id) => byId.get(id))
+      .filter((row): row is AssistantDish => Boolean(row))
+      .filter((row) => row.is_available !== false)
+      .map((row) => {
+        const name = dishNameFromFields(
+          {
+            name: row.name,
+            name_en: row.name_en,
+            name_ru: row.name_ru,
+          },
+          locale,
+        );
+        return `${name} [id:${row.id}]`;
+      });
+    if (pairs.length) lines.push(`pairs_with: ${pairs.join("; ")}`);
+  }
+  // Never expose free-text wine_pairing as a recommendable companion source —
+  // only admin pairing_dish_ids (pairs_with) may drive suggestions.
   if (dish.is_popular) lines.push("popular");
   return lines.join("\n");
 }
@@ -479,10 +527,15 @@ function focusedDishCards(
   focusedDishes?: AssistantDish[],
 ) {
   const available = dishes.filter((dish) => dish.is_available !== false);
+  const byId = new Map(
+    available
+      .filter((dish) => dish.id)
+      .map((dish) => [String(dish.id), dish] as const),
+  );
   const focused =
     focusedDishes?.filter((dish) => dish.is_available !== false) ?? [];
   const cards = focused.length ? focused : fallbackFocus(available);
-  return cards.map((dish) => fullDishCard(dish, locale)).join("\n\n");
+  return cards.map((dish) => fullDishCard(dish, locale, byId)).join("\n\n");
 }
 
 export function buildMenuContext(
@@ -510,6 +563,7 @@ export function buildChefTurnPrompt(
   options?: {
     includeCartPairing?: boolean;
     includeFilters?: boolean;
+    guestMessage?: string;
   },
 ) {
   const includeCartPairing = options?.includeCartPairing !== false;
@@ -520,7 +574,7 @@ export function buildChefTurnPrompt(
     : "";
   const filters = includeFilters ? constraintsBlock(constraints) : "";
   const cart = includeCartPairing
-    ? cartPairingBlock(dishes, constraints)
+    ? cartPairingBlock(dishes, constraints, options?.guestMessage)
     : "";
   return `${filters}${cart}
 LIVE MENU FULL CARDS (quote these fields; do not invent)
@@ -553,19 +607,75 @@ function assistantCourse(dish: AssistantDish): FlavorCourse {
   });
 }
 
+function guestAsksForDrinkPairing(message?: string) {
+  return /ღვინ|wine|pairing|შეათავაზ|შევუსაბამ|ухдит|вино|напит|სასმელ|drink|beer|ლუდ/i.test(
+    String(message ?? ""),
+  );
+}
+
 function cartPairingBlock(
   dishes: AssistantDish[],
   constraints?: GuestChatConstraints,
+  guestMessage?: string,
 ) {
   const ids = (constraints?.cartDishIds ?? [])
     .map((id) => id.trim().toLowerCase())
     .filter(Boolean);
+  const byId = new Map(
+    dishes
+      .filter((dish) => dish.id)
+      .map((dish) => [String(dish.id).toLowerCase(), dish] as const),
+  );
   const cart = dishes.filter((dish) =>
     ids.includes(String(dish.id ?? "").toLowerCase()),
   );
   const hasDessert = cart.some((dish) => assistantCourse(dish) === "dessert");
   const hasDrink = cart.some((dish) => assistantCourse(dish) === "drink");
-  const mix = cartRecommendationSlots(hasDessert, hasDrink);
+
+  let preferDrink = guestAsksForDrinkPairing(guestMessage);
+  let preferDessert = false;
+  const curatedLines: string[] = [];
+  const focusDish = cart[cart.length - 1];
+  const pairingSources = focusDish ? [focusDish] : cart;
+  for (const dish of pairingSources) {
+    const pairIds = dish.pairing_dish_ids ?? [];
+    if (!pairIds.length) continue;
+    const named: string[] = [];
+    for (const rawId of pairIds) {
+      const companion = byId.get(String(rawId).toLowerCase());
+      if (!companion || companion.is_available === false) continue;
+      const course = assistantCourse(companion);
+      if (course === "drink") preferDrink = true;
+      if (course === "dessert") preferDessert = true;
+      named.push(
+        `${companion.name} [${course}] [id:${companion.id}]`,
+      );
+    }
+    if (named.length) {
+      curatedLines.push(`${dish.name} → ${named.join("; ")}`);
+    }
+  }
+
+  // Even with an empty cart, if focused/menu cards have pairs_with drinks and the
+  // guest asked for wine/drink, reserve a drink slot.
+  if (!preferDrink) {
+    for (const dish of dishes) {
+      for (const rawId of dish.pairing_dish_ids ?? []) {
+        const companion = byId.get(String(rawId).toLowerCase());
+        if (!companion || companion.is_available === false) continue;
+        if (assistantCourse(companion) === "drink") {
+          preferDrink = guestAsksForDrinkPairing(guestMessage);
+          break;
+        }
+      }
+      if (preferDrink) break;
+    }
+  }
+
+  const mix = cartRecommendationSlots(hasDessert, hasDrink, {
+    preferDrink: preferDrink && !constraints?.noAlcohol,
+    preferDessert,
+  });
   const mixLabel = mix
     .map((course) =>
       course === "dessert"
@@ -590,12 +700,57 @@ function cartPairingBlock(
         ? "B — cart has dessert, no drink: 2 additional savory dishes + 1 dessert"
         : hasDrink
           ? "drink in cart, no dessert: 2 savory dishes + 1 drink"
-          : "A — neither dessert nor drink in cart: 3 distinct savory dishes (no dessert, no drink)";
+          : preferDrink && preferDessert
+            ? "A+ — savory cart with curated drink+dessert: 1 savory + 1 dessert + 1 drink from pairs_with"
+            : preferDrink
+              ? "A+ — savory cart with curated drink: 2 savory dishes + 1 drink (prefer pairs_with drink)"
+              : preferDessert
+                ? "A+ — savory cart with curated dessert: 2 savory dishes + 1 dessert (prefer pairs_with dessert)"
+                : "A — neither dessert nor drink in cart: 3 distinct savory dishes (no dessert, no drink)";
+  const curatedOnly = curatedLines.length > 0;
+  const curatedIdsFlat: string[] = [];
+  for (const dish of cart) {
+    for (const rawId of dish.pairing_dish_ids ?? []) {
+      const companion = byId.get(String(rawId).toLowerCase());
+      if (!companion || companion.is_available === false) continue;
+      if (constraints?.noAlcohol && assistantCourse(companion) === "drink") {
+        const tags = `${companion.name} ${companion.category ?? ""}`;
+        if (/ღვინ|wine|საფერავ|ლუდ|beer|qvevri|ყვევრ/i.test(tags)) continue;
+      }
+      if (!curatedIdsFlat.includes(String(companion.id))) {
+        curatedIdsFlat.push(String(companion.id));
+      }
+    }
+  }
+  // Prefer the last cart item's official list when present.
+  const focus = cart[cart.length - 1];
+  const focusCurated = (focus?.pairing_dish_ids ?? [])
+    .map((id) => byId.get(String(id).toLowerCase()))
+    .filter((dish): dish is AssistantDish => Boolean(dish))
+    .filter((dish) => dish.is_available !== false)
+    .map((dish) => String(dish.id));
+  const strictIds = focusCurated.length ? focusCurated : curatedIdsFlat;
+
+  const curatedBlock = curatedOnly
+    ? `
+- STRICT OFFICIAL COMPANIONS ONLY (pairs_with) — do NOT invent other dishes/drinks:
+${curatedLines.map((line) => `  • ${line}`).join("\n")}
+- Output DISH_IDS as EXACTLY these ids in this order (all of them, skip only sold-out/already-in-cart): ${strictIds.join(",") || "(none available)"}
+- Spoken reply may ONLY name cart items plus these official companions. Never recommend anything outside this list.`
+    : "";
   const dietPriority =
-    constraints?.vegetarian || constraints?.vegan
+    !curatedOnly && (constraints?.vegetarian || constraints?.vegan)
       ? `
 - DIET OVERRIDE: Guest wants vegetarian/fasting (or vegan). Every DISH_ID must match diet: vegetarian or fasting/vegan on the cards. Prefer 3 matching savory plates. Skip alcohol. Only use dessert/drink slots if a matching diet item exists on LIVE MENU.`
       : "";
+  if (curatedOnly) {
+    return `
+CART & OFFICIAL PAIRING (mandatory when recommending)
+- Current cart: ${cartLine}
+${curatedBlock}
+- Specific-dish fact questions (ingredients, allergens, macros of one named plate) may return that one id. Browse / "recommend" / "what else" / pairing MUST use the official companions list above.
+`;
+  }
   return `
 CART & 3-CARD PAIRING (mandatory when recommending)
 - Current cart: ${cartLine}
@@ -760,16 +915,17 @@ export function buildCacheableChefSystemPrompt(
 - This host belongs only to ${restaurantName}. You have no memory of any other restaurant's menu, chat, or dishes.
 
 ROLE
-- Browse / recommend: keep the spoken reply to 3–4 sentences. Finish fast.
-- Specific-dish questions: use the FULL card. Quote desc, in, all, macros, and prep when printed. You may go longer than 3–4 sentences so the answer is complete.
+- Browse / recommend: 2–3 short sentences, max ~80–120 words. Finish with DISH_IDS on the last line.
+- Specific-dish questions: use the FULL card. Quote desc, in, all, macros, and prep when printed. Keep under ~120 words when possible.
 - Speak as an expert chef using ONLY items on the LIVE MENU INDEX / FULL cards.
 - Bestsellers: recommend listed dishes only. Never invent a bestseller, price, allergen, or dish.
 - Answer ingredients, allergens, pairings, diet, macros, and prep from printed FULL / INDEX fields only.
+- INDEX tags: [V]=vegan/fasting, [VG]=vegetarian, [GF]=no printed gluten signal, [nuts]=contains nuts.
 - If a field is printed, quote it. Do not say you will confirm with the kitchen for a printed fact.
 - If a fact is not printed, say you will confirm with the kitchen. Do not invent numbers or extra ingredients.
 - Tone: warm, professional, never robotic. One short greeting at most.
 - Georgian must sound native and spoken, like a Tbilisi host at the table — not a translation and not a grammar textbook.
-- There is no second rewrite pass. First-pass Georgian must already be fluent: polite თქვენ, 3–4 short spoken sentences on browse/recommend, no invented dishes, no English or Russian words in a Georgian reply.
+- There is no second rewrite pass. First-pass Georgian must already be fluent: polite თქვენ, 2–3 short spoken sentences on browse/recommend, no invented dishes, no English or Russian words in a Georgian reply.
 
 SCOPE
 - If a request is unrelated to food, dining, wine, allergens, or this restaurant, politely decline and redirect the guest back to the menu.
@@ -815,9 +971,13 @@ NO ALCOHOL (strict)
 - In those cases, pair with a listed non-alcoholic extra from LIVE MENU only, or skip pairing entirely. Never mention beer, lemonade, water, or tea unless that exact item is printed in LIVE MENU.
 
 PAIRINGS
-- Follow CART & 3-CARD PAIRING: drinks and desserts appear in the 3 cards only when that mix rule includes them.
-- Only mention alcohol when the mix includes a drink, the guest asks for a pairing/drink, or they are choosing a regular adult meal (not kids, not a rushed lunch, not a diet-safety question).
-- Pair only with drinks or extras printed on the LIVE MENU. If none are listed, skip that slot and fill with another listed savory dish. Do not invent wine names, vintages, or dishes from other restaurants.
+- Follow-up dish names after a pairing question (e.g. guest asked what pairs with khachapuri, then writes "ხინკალზე?") still mean "what pairs with that dish".
+- When a dish card prints pairs_with, that list is the restaurant's ONLY allowed companions for that dish. Recommend every available id from pairs_with and nothing else for pairing/upsell.
+- If the guest asks what goes with a named dish and that dish has NO pairs_with list, do NOT invent pairings (no wine, no soda, no dessert). Say companions are not set yet and output DISH_IDS: none.
+- Never reuse another dish's pairs_with for a different named dish.
+- If the cart dish has pairs_with and the guest is NOT asking about a different dish, use only that official list (all ids).
+- Only when pairs_with is empty AND the guest is NOT asking "what goes with X": follow CART & 3-CARD PAIRING; drinks/desserts appear only when the mix includes them.
+- Never invent wine names, vintages, or dishes from other restaurants.
 
 LIVE MENU:
 ${liveMenu}`;
