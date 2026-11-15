@@ -5,7 +5,7 @@ import {
   AdminLocaleProvider,
   useAdminLocale,
 } from "@/components/admin/admin-locale";
-import type { AdminUiKey } from "@/lib/admin-i18n";
+import type { AdminUiStringKey } from "@/lib/admin-i18n";
 import type { ReactNode } from "react";
 
 export function AuthPageShell({
@@ -13,8 +13,8 @@ export function AuthPageShell({
   hintKey,
   children,
 }: {
-  titleKey: AdminUiKey;
-  hintKey?: AdminUiKey;
+  titleKey: AdminUiStringKey;
+  hintKey?: AdminUiStringKey;
   children: ReactNode;
 }) {
   return (
@@ -31,8 +31,8 @@ function AuthPageShellInner({
   hintKey,
   children,
 }: {
-  titleKey: AdminUiKey;
-  hintKey?: AdminUiKey;
+  titleKey: AdminUiStringKey;
+  hintKey?: AdminUiStringKey;
   children: ReactNode;
 }) {
   const { t } = useAdminLocale();

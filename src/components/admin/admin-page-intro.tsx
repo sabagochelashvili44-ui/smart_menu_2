@@ -1,14 +1,14 @@
 "use client";
 
 import { useAdminLocale } from "@/components/admin/admin-locale";
-import type { AdminUiKey } from "@/lib/admin-i18n";
+import type { AdminUiStringKey } from "@/lib/admin-i18n";
 
 export function AdminPageIntro({
   titleKey,
   subtitleKey,
 }: {
-  titleKey: AdminUiKey;
-  subtitleKey?: AdminUiKey;
+  titleKey: AdminUiStringKey;
+  subtitleKey?: AdminUiStringKey;
 }) {
   const { t } = useAdminLocale();
   return (

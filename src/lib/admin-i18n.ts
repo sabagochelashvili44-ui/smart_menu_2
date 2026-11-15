@@ -1750,6 +1750,10 @@ export const adminUi = {
 } as const;
 
 export type AdminUiKey = keyof (typeof adminUi)["en"];
+/** Keys whose value is a plain string (safe to render as ReactNode). */
+export type AdminUiStringKey = {
+  [K in AdminUiKey]: (typeof adminUi)["en"][K] extends string ? K : never;
+}[AdminUiKey];
 export type AdminCopy = (typeof adminUi)[AdminLocale];
 
 export function adminT(locale: AdminLocale, key: AdminUiKey) {

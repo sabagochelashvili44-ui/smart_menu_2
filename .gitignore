@@ -46,3 +46,14 @@ next-env.d.ts
 
 .vercel
 .env*
+
+# local scratch / load-test artifacts (break Vercel typecheck if uploaded)
+tmp-*.mts
+tmp-*.ts
+tmp-*.mjs
+scripts/probe-*.mjs
+scripts/probe-*.ts
+scripts/*-result.json
+middleware.zip
+.cursor/
+.vscode/
