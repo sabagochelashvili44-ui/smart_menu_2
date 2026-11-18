@@ -820,20 +820,25 @@ export async function handleAiWaiterPost(request: Request) {
             }
             return merged;
           })();
-          const dietFromMessage =
+          const wantsVegOrFasting =
             /ვეგეტარ|სამარხვ|მარხვ|vegetarian|vegan|fasting|вегетариан|постн|постан|веган/i.test(
               ctx.message,
             );
+          const wantsVegetarianWord =
+            /ვეგეტარ|vegetarian|вегетариан/i.test(ctx.message);
+          const wantsVeganOnly =
+            /ვეგან|vegan|სამარხვ|მარხვ|fasting|постн|постан/i.test(
+              ctx.message,
+            ) && !wantsVegetarianWord;
           const constraints = {
             ...ctx.constraints,
             serviceFeePercent,
             vegetarian:
-              Boolean(ctx.constraints?.vegetarian) || dietFromMessage,
-            vegan:
-              Boolean(ctx.constraints?.vegan) ||
-              /ვეგან|vegan|სამარხვ|fasting|постн|постан/i.test(ctx.message),
+              Boolean(ctx.constraints?.vegetarian) || wantsVegOrFasting,
+            // "სამარხვო ან ვეგეტარიანული" must not force vegan (excludes cream soups).
+            vegan: Boolean(ctx.constraints?.vegan) || wantsVeganOnly,
             noAlcohol:
-              Boolean(ctx.constraints?.noAlcohol) || dietFromMessage,
+              Boolean(ctx.constraints?.noAlcohol) || wantsVegOrFasting,
           };
           // Cache rules + INDEX (when included). Lite keeps INDEX off for smaller prompts.
           const includeIndex = route === "flash";

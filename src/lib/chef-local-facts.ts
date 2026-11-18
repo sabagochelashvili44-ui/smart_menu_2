@@ -63,6 +63,24 @@ function queryTokens(raw: string) {
     });
 }
 
+/** Category words alone must not resolve a dish (e.g. "მარსის სუპი" ≠ cream soup). */
+const GENERIC_DISH_NEEDLES = new Set([
+  "სუპ",
+  "soup",
+  "суп",
+  "სალათ",
+  "salad",
+  "салат",
+  "ღვინ",
+  "wine",
+  "вино",
+  "კერძ",
+  "dish",
+  "მენიუ",
+  "menu",
+  "წვნიან",
+]);
+
 function scoreDishMatch(dish: AssistantDish, needles: string[]) {
   const names = [dish.name, dish.name_en, dish.name_ru]
     .map((value) => queryKey(String(value ?? "")))
@@ -84,17 +102,30 @@ function scoreDishMatch(dish: AssistantDish, needles: string[]) {
   );
   const blobTokens = new Set(queryTokens(blob));
   let score = 0;
+  let specificHits = 0;
   for (const needle of needles) {
+    const generic = GENERIC_DISH_NEEDLES.has(needle);
+    let hit = 0;
     for (const name of names) {
-      if (name === needle) score += 20;
-      else if (name.includes(needle)) score += 12;
-      else if (needle.includes(name) && name.length >= 4) score += 10;
+      if (name === needle) hit = Math.max(hit, 20);
+      else if (name.includes(needle)) hit = Math.max(hit, 12);
+      else if (needle.includes(name) && name.length >= 4) hit = Math.max(hit, 10);
     }
     for (const token of nameTokens) {
-      if (token === needle) score += 14;
+      if (token === needle) hit = Math.max(hit, 14);
     }
-    if (blob.includes(needle) || blobTokens.has(needle)) score += 4;
+    if (blob.includes(needle) || blobTokens.has(needle)) {
+      hit = Math.max(hit, generic ? 0 : 4);
+    }
+    if (!hit) continue;
+    if (generic) {
+      // Generic tokens only reinforce an already-specific match.
+      continue;
+    }
+    specificHits += 1;
+    score += hit;
   }
+  if (!specificHits) return 0;
   return score;
 }
 
@@ -725,7 +756,10 @@ export function buildLocalChefRecommendReply(input: {
   if (wantsFastingOnly(input.message)) {
     diet.vegan = true;
     diet.vegetarian = true;
-  } else if (!diet.vegetarian && !diet.vegan) {
+  } else {
+    // Combined chip / vegetarian ask: keep dairy vegetarian dishes
+    // (e.g. გოგრის კრემ-სუპი). Never force vegan=true here.
+    diet.vegan = false;
     diet.vegetarian = true;
   }
   const focused = pickFocusedDishes(

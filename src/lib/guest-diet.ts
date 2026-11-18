@@ -51,11 +51,18 @@ export function inferDietFromText(text: string, current = emptyDietFilter()) {
   const blob = text.trim();
   if (!blob) return next;
 
-  if (/vegan|ვეგან|веган|სამარხვ|მარხვ|fasting|постн|постан/i.test(blob)) {
+  const wantsVeganStrict =
+    /vegan|ვეგან|веган|სამარხვ|მარხვ|fasting|постн|постан/i.test(blob);
+  const wantsVegetarian =
+    /vegetarian|ვეგეტარ|вегетариан/i.test(blob);
+  // Chip "სამარხვო ან ვეგეტარიანული" is a UNION (dairy veg OK), not vegan-only.
+  if (wantsVeganStrict && wantsVegetarian) {
+    next.vegetarian = true;
+    next.vegan = false;
+  } else if (wantsVeganStrict) {
     next.vegan = true;
     next.vegetarian = true;
-  }
-  if (/vegetarian|ვეგეტარ|вегетариан/i.test(blob)) {
+  } else if (wantsVegetarian) {
     next.vegetarian = true;
   }
 

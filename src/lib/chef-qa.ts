@@ -61,6 +61,7 @@ const ID = {
   khachapuri: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa03",
   mtsvadi: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa04",
   wine: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa05",
+  pumpkinSoup: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa06",
 };
 
 function fixtureMenu(): AssistantDish[] {
@@ -128,6 +129,17 @@ function fixtureMenu(): AssistantDish[] {
       category: "ღვინო",
       ingredients: ["ყურძენი"],
       allergens: [],
+      is_available: true,
+    },
+    {
+      id: ID.pumpkinSoup,
+      name: "გოგრის კრემ-სუპი",
+      name_en: "Pumpkin cream soup",
+      description: "ნაღებიანი გოგრის სუპი",
+      price: 16,
+      category: "წვნიანები",
+      ingredients: ["გოგრა", "ნაღები", "კარაქი"],
+      allergens: ["dairy"],
       is_available: true,
     },
   ];
@@ -807,6 +819,26 @@ function pillarLanguage(menu: AssistantDish[]): ChefQaCheck[] {
       "Local recommend returns Georgian prose",
       /[\u10A0-\u10FF]/.test(spoken) && !/Do NOT|CART &/i.test(spoken),
       spoken.slice(0, 120),
+    ),
+  );
+  const dairyVegOnly = buildLocalChefRecommendReply({
+    message: "მირჩიე სამარხვო ან ვეგეტარიანული",
+    dishes: menu.filter(
+      (dish) => dish.id === ID.pumpkinSoup || dish.id === ID.mtsvadi,
+    ),
+    locale: "ka",
+  });
+  const dairySpoken = dairyVegOnly ? visibleChefText(dairyVegOnly) : "";
+  out.push(
+    check(
+      "language",
+      "veg-chip-includes-dairy-veg",
+      "სამარხვო ან ვეგეტარიანული includes cream soup (not empty refuse)",
+      Boolean(dairyVegOnly) &&
+        /გოგრის\s*კრემ-?სუპ/i.test(dairySpoken) &&
+        !/არ არის|არ გვაქვს|do not currently have/i.test(dairySpoken) &&
+        dairyVegOnly!.includes(ID.pumpkinSoup),
+      dairySpoken.slice(0, 140),
     ),
   );
 
