@@ -23,7 +23,7 @@ export function staffWriteErrorMessage(
   mode: StaffWriteMode,
 ) {
   const raw = String(error?.message ?? "").trim();
-  if (/row level security|RLS/i.test(raw)) {
+  if (/row[- ]level security|RLS/i.test(raw)) {
     if (mode === "user") {
       return "Could not save staff: owner session was rejected by database policy. Confirm you are logged in as the restaurant owner, then set SUPABASE_SERVICE_ROLE_KEY on the server.";
     }

@@ -14,6 +14,12 @@ const rls = staffWriteErrorMessage(
 );
 assert.match(rls, /owner session|SERVICE_ROLE/i);
 
+const rlsHyphen = staffWriteErrorMessage(
+  { message: "new row violates row-level security policy" },
+  "user",
+);
+assert.match(rlsHyphen, /owner session|SERVICE_ROLE/i);
+
 const rlsService = staffWriteErrorMessage(
   { message: "new row violates row level security policy" },
   "service",

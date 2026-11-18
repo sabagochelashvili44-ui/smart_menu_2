@@ -47,7 +47,7 @@ export async function loadRestaurantStaff() {
     return { error: access.error, staff: [] as StaffMember[] };
   }
 
-  const { client: supabase } = await createStaffWriteClient();
+  const { client: supabase, mode } = await createStaffWriteClient();
   const { data, error } = await supabase
     .from("restaurant_staff")
     .select("id, email, role, created_at")
@@ -55,7 +55,10 @@ export async function loadRestaurantStaff() {
     .order("created_at", { ascending: true });
 
   if (error) {
-    return { error: error.message, staff: [] as StaffMember[] };
+    return {
+      error: staffWriteErrorMessage(error, mode),
+      staff: [] as StaffMember[],
+    };
   }
 
   const staff: StaffMember[] = ((data ?? []) as Record<string, unknown>[]).map(

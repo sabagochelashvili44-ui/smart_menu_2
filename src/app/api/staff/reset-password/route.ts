@@ -2,6 +2,11 @@ import { getPublicAppUrl } from "@/lib/app-url";
 import { errorMessage } from "@/lib/http-error";
 import { normalizeStaffEmail } from "@/lib/staff-role-shared";
 import { parseSuperAdminEmails } from "@/lib/super-admin-shared";
+import {
+  createStaffWriteClient,
+  hasUsableServiceRoleKey,
+  staffWriteErrorMessage,
+} from "@/lib/staff-write-client";
 import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
 import { requireTenantApi } from "@/lib/tenant";
 import { NextResponse } from "next/server";
@@ -164,14 +169,17 @@ export async function POST(request: Request) {
       );
     }
 
-    const supabase = createSupabaseAdminClient();
-    const staff = await supabase
+    const { client: staffDb, mode } = await createStaffWriteClient();
+    const staff = await staffDb
       .from("restaurant_staff")
       .select("id, email, role")
       .eq("restaurant_id", tenant.restaurant.id);
 
     if (staff.error) {
-      return NextResponse.json({ error: staff.error.message }, { status: 500 });
+      return NextResponse.json(
+        { error: staffWriteErrorMessage(staff.error, mode) },
+        { status: 500 },
+      );
     }
 
     const row = ((staff.data ?? []) as { email?: string; role?: string }[]).find(
@@ -187,6 +195,18 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Forbidden." }, { status: 403 });
     }
 
+    // Auth Admin API requires a real service_role key (cannot use user session).
+    if (!hasUsableServiceRoleKey()) {
+      return NextResponse.json(
+        {
+          error:
+            "Password reset requires SUPABASE_SERVICE_ROLE_KEY (legacy service_role JWT) on the server.",
+        },
+        { status: 500 },
+      );
+    }
+
+    const supabase = createSupabaseAdminClient();
     const writeError = await writeAuthPassword(supabase, email, password);
     if (writeError) {
       return NextResponse.json({ error: writeError }, { status: 500 });
