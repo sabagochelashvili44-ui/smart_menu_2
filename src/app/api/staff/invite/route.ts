@@ -1,7 +1,10 @@
 import { getPublicAppUrl } from "@/lib/app-url";
 import { errorMessage } from "@/lib/http-error";
 import { normalizeStaffEmail } from "@/lib/staff-role-shared";
-import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
+import {
+  createStaffWriteClient,
+  staffWriteErrorMessage,
+} from "@/lib/staff-write-client";
 import { requireTenantApi } from "@/lib/tenant";
 import { revalidatePath } from "next/cache";
 import { NextResponse } from "next/server";
@@ -58,7 +61,7 @@ async function upsertStaffRow(
   email: string,
   role: "manager" | "waiter",
 ) {
-  const supabase = createSupabaseAdminClient();
+  const { client: supabase, mode } = await createStaffWriteClient();
   const existing = await supabase
     .from("restaurant_staff")
     .select("id")
@@ -67,17 +70,27 @@ async function upsertStaffRow(
     .maybeSingle();
 
   if (existing.data?.id) {
-    return supabase
+    const result = await supabase
       .from("restaurant_staff")
       .update({ email, role })
       .eq("id", existing.data.id)
       .eq("restaurant_id", restaurantId);
+    return {
+      error: result.error
+        ? { message: staffWriteErrorMessage(result.error, mode) }
+        : null,
+    };
   }
-  return supabase.from("restaurant_staff").insert({
+  const result = await supabase.from("restaurant_staff").insert({
     restaurant_id: restaurantId,
     email,
     role,
   });
+  return {
+    error: result.error
+      ? { message: staffWriteErrorMessage(result.error, mode) }
+      : null,
+  };
 }
 
 export async function POST(request: Request) {

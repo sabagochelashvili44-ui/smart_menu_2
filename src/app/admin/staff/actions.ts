@@ -6,7 +6,10 @@ import {
   normalizeStaffEmail,
   type StaffRole,
 } from "@/lib/staff-role-shared";
-import { createSupabaseAdminClient } from "@/lib/supabaseAdmin";
+import {
+  createStaffWriteClient,
+  staffWriteErrorMessage,
+} from "@/lib/staff-write-client";
 import { requireTenantRestaurant } from "@/lib/tenant";
 
 export type StaffMember = {
@@ -44,7 +47,7 @@ export async function loadRestaurantStaff() {
     return { error: access.error, staff: [] as StaffMember[] };
   }
 
-  const supabase = createSupabaseAdminClient();
+  const { client: supabase } = await createStaffWriteClient();
   const { data, error } = await supabase
     .from("restaurant_staff")
     .select("id, email, role, created_at")
@@ -95,7 +98,7 @@ export async function saveRestaurantStaff(formData: FormData) {
     return { error: "Enter a valid email." };
   }
 
-  const supabase = createSupabaseAdminClient();
+  const { client: supabase, mode } = await createStaffWriteClient();
 
   const existing = await supabase
     .from("restaurant_staff")
@@ -113,14 +116,14 @@ export async function saveRestaurantStaff(formData: FormData) {
       .update({ email, role })
       .eq("id", targetId)
       .eq("restaurant_id", access.restaurant.id);
-    if (error) return { error: error.message };
+    if (error) return { error: staffWriteErrorMessage(error, mode) };
   } else {
     const { error } = await supabase.from("restaurant_staff").insert({
       restaurant_id: access.restaurant.id,
       email,
       role,
     });
-    if (error) return { error: error.message };
+    if (error) return { error: staffWriteErrorMessage(error, mode) };
   }
 
   revalidatePath("/admin/staff");
@@ -134,13 +137,13 @@ export async function deleteRestaurantStaff(id: string) {
     return { error: "The owner cannot be removed from this page." };
   }
 
-  const supabase = createSupabaseAdminClient();
+  const { client: supabase, mode } = await createStaffWriteClient();
   const { error } = await supabase
     .from("restaurant_staff")
     .delete()
     .eq("id", id)
     .eq("restaurant_id", access.restaurant.id);
-  if (error) return { error: error.message };
+  if (error) return { error: staffWriteErrorMessage(error, mode) };
 
   revalidatePath("/admin/staff");
   return { error: null as string | null };
