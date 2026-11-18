@@ -12,9 +12,12 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "სმარტ მენიუ · Smart AI Menu",
+  title: {
+    default: "AltaTab · Digital QR Menu & AI Waiter",
+    template: "%s · AltaTab",
+  },
   description:
-    "QR მენიუ ქართული, ინგლისური და რუსული ენების მხარდაჭერით · Georgian House",
+    "QR digital menus with an AI chef assistant for restaurants — multilingual guests, smart upselling, and real-time waiter alerts.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
