@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import type { ReactNode } from "react";
 import Link from "next/link";
 import {
   BarChart3,
@@ -10,6 +9,7 @@ import {
   Sparkles,
   UtensilsCrossed,
 } from "lucide-react";
+import { AltatabHeader } from "@/components/landing/altatab-header";
 
 export const metadata: Metadata = {
   title: "AltaTab · Digital QR Menu & AI Waiter",
@@ -64,23 +64,6 @@ const steps = [
   },
 ] as const;
 
-function NavLink({
-  href,
-  children,
-}: {
-  href: string;
-  children: ReactNode;
-}) {
-  return (
-    <a
-      href={href}
-      className="text-sm font-medium text-[#f3ebe0]/80 transition-colors hover:text-[#f3ebe0]"
-    >
-      {children}
-    </a>
-  );
-}
-
 export default function Home() {
   return (
     <div className="landing-root flex min-h-full flex-col bg-[#140806] text-[#2d0000]">
@@ -115,48 +98,13 @@ export default function Home() {
           .landing-ambient,
           .landing-brand-mark { animation: none; }
         }
+        html { scroll-behavior: smooth; }
       `}</style>
 
-      {/* Top nav */}
-      <header className="absolute inset-x-0 top-0 z-30">
-        <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-5 py-5 sm:px-8">
-          <Link
-            href="/"
-            className="text-xl font-semibold tracking-[-0.03em] text-[#f6e7c1] sm:text-2xl"
-          >
-            AltaTab
-          </Link>
-
-          <nav className="hidden items-center gap-7 md:flex">
-            <NavLink href="#features">Features</NavLink>
-            <NavLink href="#how-it-works">How it Works</NavLink>
-            <NavLink href="#demo">Demo</NavLink>
-          </nav>
-
-          <div className="flex items-center gap-2 sm:gap-3">
-            <Link
-              href={ADMIN_LOGIN_HREF}
-              className="rounded-lg px-3 py-2 text-sm font-medium text-[#f3ebe0]/90 transition-colors hover:bg-white/10 hover:text-[#f3ebe0]"
-            >
-              Restaurant Login
-            </Link>
-            <Link
-              href={DEMO_MENU_HREF}
-              className="rounded-lg bg-[#f3ebe0] px-3.5 py-2 text-sm font-semibold text-[#3a0a0a] shadow-[0_8px_24px_rgba(0,0,0,0.28)] transition hover:bg-white"
-            >
-              Live Demo
-            </Link>
-          </div>
-        </div>
-        <nav className="mx-auto flex w-full max-w-6xl gap-5 overflow-x-auto px-5 pb-3 md:hidden sm:px-8">
-          <NavLink href="#features">Features</NavLink>
-          <NavLink href="#how-it-works">How it Works</NavLink>
-          <NavLink href="#demo">Demo</NavLink>
-        </nav>
-      </header>
+      <AltatabHeader signInHref={ADMIN_LOGIN_HREF} />
 
       {/* Hero — one composition, brand first, full-bleed visual plane */}
-      <section className="relative isolate flex min-h-svh flex-col justify-end overflow-hidden px-5 pb-16 pt-28 sm:px-8 sm:pb-20 lg:justify-center lg:pb-24 lg:pt-32">
+      <section className="relative isolate flex min-h-[calc(100svh-4.25rem)] flex-col justify-end overflow-hidden px-5 pb-16 pt-16 sm:px-8 sm:pb-20 lg:justify-center lg:pb-24 lg:pt-20">
         <div
           aria-hidden
           className="absolute inset-0 -z-20 bg-[radial-gradient(120%_90%_at_70%_10%,#8b1a1a_0%,#4a0c0c_38%,#140806_78%)]"
@@ -283,14 +231,14 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Features */}
+      {/* Platform */}
       <section
-        id="features"
+        id="platform"
         className="relative border-t border-[#2d0000]/10 bg-[#f3ebe0] px-5 py-20 sm:px-8 sm:py-24"
       >
         <div className="mx-auto max-w-6xl">
           <p className="text-sm font-semibold tracking-[0.14em] text-[#6d0808] uppercase">
-            Features
+            Platform
           </p>
           <h2 className="mt-3 max-w-2xl text-3xl font-semibold tracking-[-0.03em] text-[#2d0000] sm:text-4xl">
             Built for the dining room — and the bottom line
@@ -369,33 +317,106 @@ export default function Home() {
         </div>
       </section>
 
+      <section
+        id="security"
+        className="relative border-t border-[#2d0000]/8 bg-[#f3ebe0] px-5 py-16 sm:px-8 sm:py-20"
+      >
+        <div className="mx-auto max-w-6xl">
+          <p className="text-sm font-semibold tracking-[0.14em] text-[#6d0808] uppercase">
+            Security &amp; Access
+          </p>
+          <h2 className="mt-3 max-w-2xl text-3xl font-semibold tracking-[-0.03em] text-[#2d0000] sm:text-4xl">
+            Membership-gated by design
+          </h2>
+          <p className="mt-4 max-w-2xl text-base leading-relaxed text-[#5c4038] sm:text-lg">
+            There is no public signup. Restaurant staff sign in with invited
+            accounts; owners manage roles, and guest menus stay separate from
+            admin access.
+          </p>
+        </div>
+      </section>
+
+      <section
+        id="pricing"
+        className="relative bg-[#ebe3d4] px-5 py-16 sm:px-8 sm:py-20"
+      >
+        <div className="mx-auto max-w-6xl">
+          <p className="text-sm font-semibold tracking-[0.14em] text-[#6d0808] uppercase">
+            Pricing / Membership
+          </p>
+          <h2 className="mt-3 max-w-2xl text-3xl font-semibold tracking-[-0.03em] text-[#2d0000] sm:text-4xl">
+            Exclusive plans for serious operators
+          </h2>
+          <p className="mt-4 max-w-2xl text-base leading-relaxed text-[#5c4038] sm:text-lg">
+            Altatab is sold as a paid membership. Request access and we&apos;ll
+            tailor onboarding, AI usage, and multi-location options to your
+            group.
+          </p>
+        </div>
+      </section>
+
+      <section
+        id="contact"
+        className="relative border-t border-[#2d0000]/8 bg-[#f3ebe0] px-5 py-16 sm:px-8 sm:py-20"
+      >
+        <div className="mx-auto max-w-6xl">
+          <p className="text-sm font-semibold tracking-[0.14em] text-[#6d0808] uppercase">
+            Contact / Enterprise
+          </p>
+          <h2 className="mt-3 max-w-2xl text-3xl font-semibold tracking-[-0.03em] text-[#2d0000] sm:text-4xl">
+            Talk to us about your venues
+          </h2>
+          <p className="mt-4 max-w-2xl text-base leading-relaxed text-[#5c4038] sm:text-lg">
+            Multi-location groups and enterprise rollouts start with a short
+            access request. Existing members sign in to the admin panel.
+          </p>
+          <div className="mt-8 flex flex-wrap gap-3">
+            <Link
+              href={ADMIN_LOGIN_HREF}
+              className="inline-flex min-h-11 items-center justify-center rounded-xl border border-[#2d0000]/20 bg-transparent px-5 text-sm font-semibold text-[#2d0000] transition hover:bg-[#2d0000]/6"
+            >
+              Sign In
+            </Link>
+            <Link
+              href={DEMO_MENU_HREF}
+              className="inline-flex min-h-11 items-center justify-center rounded-xl bg-[#6d0808] px-5 text-sm font-semibold text-[#f3ebe0] transition hover:bg-[#5a0606]"
+            >
+              Explore sample menu
+            </Link>
+          </div>
+        </div>
+      </section>
+
       <footer className="border-t border-[#f3ebe0]/15 bg-[#140806] px-5 py-10 sm:px-8">
         <div className="mx-auto flex max-w-6xl flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p className="text-lg font-semibold tracking-[-0.03em] text-[#f6e7c1]">
-              AltaTab
+              Altatab
             </p>
             <p className="mt-1 text-sm text-[#f3ebe0]/55">
               Smart digital menus with an AI chef for restaurants.
             </p>
           </div>
           <nav className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-[#f3ebe0]/7">
-            <a href="#features" className="hover:text-[#f3ebe0]">
-              Features
+            <a href="#platform" className="hover:text-[#f3ebe0]">
+              Platform
             </a>
-            <a href="#how-it-works" className="hover:text-[#f3ebe0]">
-              How it Works
+            <a href="#security" className="hover:text-[#f3ebe0]">
+              Security
             </a>
-            <Link href={DEMO_MENU_HREF} className="hover:text-[#f3ebe0]">
-              Demo
-            </Link>
+            <a href="#pricing" className="hover:text-[#f3ebe0]">
+              Pricing
+            </a>
+            <a href="#contact" className="hover:text-[#f3ebe0]">
+              Contact
+            </a>
             <Link href={ADMIN_LOGIN_HREF} className="hover:text-[#f3ebe0]">
-              Login
+              Sign In
             </Link>
           </nav>
         </div>
         <p className="mx-auto mt-8 max-w-6xl text-xs text-[#f3ebe0]/40">
-          © {new Date().getFullYear()} AltaTab. All rights reserved.
+          © {new Date().getFullYear()} Altatab. All rights reserved.
         </p>
       </footer>
     </div>
