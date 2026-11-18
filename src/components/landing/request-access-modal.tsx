@@ -18,20 +18,53 @@ type RequestAccessModalProps = {
   onOpenChange: (open: boolean) => void;
 };
 
+type FormStatus = "idle" | "submitting" | "sent" | "error";
+
 export function RequestAccessModal({
   open,
   onOpenChange,
 }: RequestAccessModalProps) {
-  const [status, setStatus] = useState<"idle" | "sent">("idle");
+  const [status, setStatus] = useState<FormStatus>("idle");
+  const [error, setError] = useState<string | null>(null);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    // Gated waitlist UX — no public signup. Persist later via API if needed.
-    setStatus("sent");
+    const form = event.currentTarget;
+    const data = new FormData(form);
+
+    setStatus("submitting");
+    setError(null);
+
+    try {
+      const response = await fetch("/api/access-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: String(data.get("name") ?? ""),
+          email: String(data.get("email") ?? ""),
+          restaurant: String(data.get("restaurant") ?? ""),
+          note: String(data.get("note") ?? ""),
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error || "Could not send your request.");
+      }
+      setStatus("sent");
+      form.reset();
+    } catch (err) {
+      setStatus("error");
+      setError(err instanceof Error ? err.message : "Could not send your request.");
+    }
   }
 
   function handleOpenChange(next: boolean) {
-    if (!next) setStatus("idle");
+    if (!next) {
+      setStatus("idle");
+      setError(null);
+    }
     onOpenChange(next);
   }
 
@@ -55,7 +88,7 @@ export function RequestAccessModal({
 
         {status === "sent" ? (
           <div className="rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-5 text-sm leading-relaxed text-white/90">
-            Thanks — your request was received. Our team will reach out shortly.
+            Thanks — your request was sent. Our team will reach out shortly.
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="grid gap-4">
@@ -68,6 +101,7 @@ export function RequestAccessModal({
                 name="name"
                 required
                 autoComplete="name"
+                disabled={status === "submitting"}
                 className="h-10 border-white/15 bg-white/5 text-white placeholder:text-white/35 focus-visible:border-cyan-400/50 focus-visible:ring-cyan-400/25"
                 placeholder="Alex Rivera"
               />
@@ -82,6 +116,7 @@ export function RequestAccessModal({
                 type="email"
                 required
                 autoComplete="email"
+                disabled={status === "submitting"}
                 className="h-10 border-white/15 bg-white/5 text-white placeholder:text-white/35 focus-visible:border-cyan-400/50 focus-visible:ring-cyan-400/25"
                 placeholder="you@restaurant.com"
               />
@@ -94,6 +129,7 @@ export function RequestAccessModal({
                 id="access-restaurant"
                 name="restaurant"
                 required
+                disabled={status === "submitting"}
                 className="h-10 border-white/15 bg-white/5 text-white placeholder:text-white/35 focus-visible:border-cyan-400/50 focus-visible:ring-cyan-400/25"
                 placeholder="Aurora Bistro"
               />
@@ -107,15 +143,22 @@ export function RequestAccessModal({
                 id="access-note"
                 name="note"
                 rows={3}
+                disabled={status === "submitting"}
                 className="min-h-20 border-white/15 bg-white/5 text-white placeholder:text-white/35 focus-visible:border-cyan-400/50 focus-visible:ring-cyan-400/25"
                 placeholder="Locations, timeline, or questions…"
               />
             </div>
+            {error ? (
+              <p className="text-sm text-red-300" role="alert">
+                {error}
+              </p>
+            ) : null}
             <button
               type="submit"
-              className="mt-1 inline-flex h-11 items-center justify-center rounded-xl bg-cyan-400 px-4 text-sm font-semibold text-[#041016] transition hover:bg-cyan-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/60"
+              disabled={status === "submitting"}
+              className="mt-1 inline-flex h-11 items-center justify-center rounded-xl bg-cyan-400 px-4 text-sm font-semibold text-[#041016] transition hover:bg-cyan-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/60 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              Submit request
+              {status === "submitting" ? "Sending…" : "Submit request"}
             </button>
           </form>
         )}
